@@ -17,3 +17,21 @@
  
  from pandas._config.config import OptionError
  
+--- a/lib/python/site-packages/pandas/core/interchange/from_dataframe.py
++++ b/lib/python/site-packages/pandas/core/interchange/from_dataframe.py
+@@ -1,6 +1,14 @@
+ from __future__ import annotations
+ 
+-import ctypes
++try:
++    import ctypes
++except ModuleNotFoundError:
++    # tebako deviation B: the POSIX tebako python runtime's hermetic core
++    # ships no _ctypes (the factory's DISABLED_MODULES; windows-msys
++    # re-enables it). ctypes is used only inside buffer_to_ndarray below --
++    # the dataframe-interchange protocol, which degrades loudly on a
++    # no-ctypes runtime and is never on the payload's own paths.
++    ctypes = None
+ import re
+ from typing import (
+     Any,
