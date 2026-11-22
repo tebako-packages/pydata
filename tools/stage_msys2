@@ -32,9 +32,12 @@
 set -euo pipefail
 
 FEEDSTOCK="$(cd "$(dirname "$0")/.." && pwd)"
+# The UCRT64 msys2 shell carries NO ruby — the recipe reads flow through
+# the environment (the workflow's pins export step, pins.rb --msys-env);
+# the recipe fallback keeps direct local runs working where ruby exists.
 recipe() { ruby -ryaml -e "puts(YAML.load_file('$FEEDSTOCK/Tebakofile').dig(*ARGV) || '')" "$@"; }
 
-VERSION="${VERSION:-$(recipe upstream version)}"
+VERSION="${PKG_VERSION:-${VERSION:-$(recipe upstream version)}}"
 MSYS_PY="${MSYS_PY:-$(recipe build windows_msys python)}"
 SITE_SRC="/ucrt64/lib/python${MSYS_PY}/site-packages"
 OUT_SITE="$FEEDSTOCK/out/msys2-site"
@@ -49,14 +52,14 @@ die() { echo "stage_msys2: $*" >&2; exit 1; }
 step "assert the msys2 ucrt64 python line ($MSYS_PY) matches the runtime's ABI line"
 [ -d "$SITE_SRC" ] || die "no msys2 python$MSYS_PY site-packages at $SITE_SRC — msys2's python line drifted from the recipe (build.windows_msys.python); a cp313 tree cannot serve the cp314 runtime"
 
-members="$(recipe build windows_msys members | tr '\n' ' ')"
-closure_members="$(recipe build windows_msys closure_members | tr '\n' ' ')"
+members="${MSYS_MEMBERS:-$(recipe build windows_msys members | tr '\n' ' ')}"
+closure_members="${MSYS_CLOSURE_MEMBERS:-$(recipe build windows_msys closure_members | tr '\n' ' ')}"
 packages="$members $closure_members"
 packages="$(echo "$packages" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 [ -n "${packages// /}" ] || die "Tebakofile build.windows_msys carries no members"
 
-step "pacman -S --needed: $packages"
-pacman -S --needed --noconfirm $packages
+step "pacman -Sy --needed: $packages"
+pacman -Sy --needed --noconfirm $packages
 
 step "stage site-packages members -> $OUT_SITE"
 rm -rf "$OUT_SITE"
@@ -77,7 +80,7 @@ done
 [ "$staged_top" -gt 0 ] || die "nothing staged — the package set owns no site-packages members"
 # The flagship trio must be present (the recipe's native_members — the
 # same fail-closed assertion gen_closure runs for the POSIX legs).
-for m in $(recipe build native_members); do
+for m in ${NATIVE_MEMBERS:-$(recipe build native_members)}; do
   [ -d "$OUT_SITE/$m" ] || die "native member $m not staged under $OUT_SITE — the msys2 package set drifted"
 done
 echo "staged: $(du -sh "$OUT_SITE" | cut -f1) across $staged_top top-level members"
@@ -86,7 +89,9 @@ step "collect the PE import closure -> $OUT_DLLS"
 # mingw ldd cannot trace PE binaries; the import table via objdump is the
 # source of truth. The worklist fixpoints: a copied DLL's own imports
 # ride too (libopenblas -> libgfortran -> libquadmath ...).
-worklist=("$OUT_SITE"/*/*.pyd "$OUT_SITE"/*/*.dll)
+worklist=()
+while IFS= read -r f; do worklist+=("$f"); done < <(find "$OUT_SITE" \( -name '*.pyd' -o -name '*.dll' \) -type f)
+[ "${#worklist[@]}" -gt 0 ] || die "no .pyd/.dll staged under $OUT_SITE — the msys2 package set drifted"
 declare -A seen=()
 for pass in 1 2 3 4 5 6; do
   add=()

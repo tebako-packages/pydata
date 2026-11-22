@@ -156,6 +156,12 @@ jobs:
           install: >-
             binutils
 
+      - name: Export the msys2 staging pins (windows-ucrt only)
+        # The UCRT64 msys2 shell carries no ruby — stage_msys2's recipe
+        # reads flow through $GITHUB_ENV (the recipe stays the SSOT).
+        if: matrix.triplet == 'x86_64-windows-ucrt'
+        run: ruby tools/pins.rb --msys-env >> "$GITHUB_ENV"
+
       - name: Stage the msys2 prebuilt stack (windows-ucrt only)
         # pacman install + site-packages staging + the PE import closure +
         # the staging record (tools/stage_msys2 owns the member list — the
