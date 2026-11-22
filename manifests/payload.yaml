@@ -50,7 +50,12 @@ checks:
     entry: /bin/pydata
     argv: ["--version"]
     expect: {exit: 0}
-    timeout: 60
+    # POSIX VFS boots pass in ~3 s; the windows materialize tier extracts
+    # the whole tree per boot (measured 44 s for the sibling analyze check
+    # on a windows-latest runner, and a 60 s deadline died 62% through the
+    # extraction — run 45006376069). 180 s is the materialize-tier scale,
+    # same as analyze; the hang-guard semantics are unchanged.
+    timeout: 180
   analyze:
     # the scripted-analysis render: CSV in the fixtures image → summary on
     # stdout + a matplotlib PNG in the scratch dir, all inside the image
