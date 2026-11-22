@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# tools/stage_msys2 — the x86_64-windows-ucrt staging half (README
+# decision 3): collect the scientific stack from msys2's PREBUILT ucrt64
+# packages into out/msys2-site/ (site-packages members) + out/msys2-dlls/
+# (the PE import closure), for tools/build to assemble. Runs under the
+# UCRT64 msys2 shell (the workflow's `shell: msys2 {0}` step) — never git
+# bash, which lacks /ucrt64.
+#
+# Why not PyPI wheels: win_amd64 wheels are MSVC-built (cp314 win_amd64)
+# and the ucrt runtime is a mingw cpython (cp314-mingw_x86_64_ucrt_gnu)
+# that cannot load them; PyPI publishes no mingw wheels (the xml2rfc
+# lxml lesson). pacman delivers SIGNED PREBUILT binaries — the same
+# audience-law reading as the runtime factory's own windows support set:
+# no compilation machinery anywhere.
+#
+# Steps:
+#   1. assert the msys2 ucrt64 python line matches the runtime's ABI line
+#      (recipe build.windows_msys.python — fail closed on drift; a cp313
+#      tree against the cp314 runtime would be a named error at dispatch,
+#      so catch it here)
+#   2. pacman -S --needed the pinned members + closure members (idempotent)
+#   3. copy each package's site-packages top-level entries into
+#      out/msys2-site/ (pacman -Ql is the ownership oracle — never a glob)
+#   4. objdump-walk the staged .pyd/.dll files' PE imports and copy every
+#      /ucrt64/bin provider into out/msys2-dlls/ (the fixpoint walk the
+#      xml2rfc workflow runs for lxml — a copied DLL's own imports ride
+#      too); system DLLs are skipped by absence from /ucrt64/bin
+#   5. record closure/<version>-x86_64-windows-ucrt.txt: pacman -Q of
+#      every staged package — the windows lock is a RECORD of the
+#      prebuilt set (the POSIX locks are hash-INPUTS; the asymmetry is
+#      documented in the README), asserted non-empty
+set -euo pipefail
+
+FEEDSTOCK="$(cd "$(dirname "$0")/.." && pwd)"
+recipe() { ruby -ryaml -e "puts(YAML.load_file('$FEEDSTOCK/Tebakofile').dig(*ARGV) || '')" "$@"; }
+
+VERSION="${VERSION:-$(recipe upstream version)}"
+MSYS_PY="${MSYS_PY:-$(recipe build windows_msys python)}"
+SITE_SRC="/ucrt64/lib/python${MSYS_PY}/site-packages"
+OUT_SITE="$FEEDSTOCK/out/msys2-site"
+OUT_DLLS="$FEEDSTOCK/out/msys2-dlls"
+LOCK="$FEEDSTOCK/closure/$VERSION-x86_64-windows-ucrt.txt"
+
+step() { printf '\n== %s\n' "$*"; }
+die() { echo "stage_msys2: $*" >&2; exit 1; }
+
+[ -d /ucrt64 ] || die "no /ucrt64 tree — run under the UCRT64 msys2 shell (shell: msys2 {0})"
+
+step "assert the msys2 ucrt64 python line ($MSYS_PY) matches the runtime's ABI line"
+[ -d "$SITE_SRC" ] || die "no msys2 python$MSYS_PY site-packages at $SITE_SRC — msys2's python line drifted from the recipe (build.windows_msys.python); a cp313 tree cannot serve the cp314 runtime"
+
+members="$(recipe build windows_msys members | tr '\n' ' ')"
+closure_members="$(recipe build windows_msys closure_members | tr '\n' ' ')"
+packages="$members $closure_members"
+packages="$(echo "$packages" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+[ -n "${packages// /}" ] || die "Tebakofile build.windows_msys carries no members"
+
+step "pacman -S --needed: $packages"
+pacman -S --needed --noconfirm $packages
+
+step "stage site-packages members -> $OUT_SITE"
+rm -rf "$OUT_SITE"
+mkdir -p "$OUT_SITE" "$OUT_DLLS"
+staged_top=0
+for pkg in $packages; do
+  # pacman -Ql is the ownership oracle: each line is "<pkg> <abs path>";
+  # keep the package's site-packages entries, copy the TOP-LEVEL member
+  # (a dir copies whole; a .py file copies itself).
+  tops="$(pacman -Ql "$pkg" | awk '{print $2}' | grep "^${SITE_SRC}/" | sed "s|^${SITE_SRC}/||" | cut -d/ -f1 | sort -u)"
+  [ -n "$tops" ] || die "package $pkg owns nothing under $SITE_SRC"
+  for top in $tops; do
+    [ -e "$OUT_SITE/$top" ] || cp -r "$SITE_SRC/$top" "$OUT_SITE/"
+    staged_top=$((staged_top + 1))
+  done
+  echo "  $pkg: $(echo "$tops" | tr '\n' ' ')"
+done
+[ "$staged_top" -gt 0 ] || die "nothing staged — the package set owns no site-packages members"
+# The flagship trio must be present (the recipe's native_members — the
+# same fail-closed assertion gen_closure runs for the POSIX legs).
+for m in $(recipe build native_members); do
+  [ -d "$OUT_SITE/$m" ] || die "native member $m not staged under $OUT_SITE — the msys2 package set drifted"
+done
+echo "staged: $(du -sh "$OUT_SITE" | cut -f1) across $staged_top top-level members"
+
+step "collect the PE import closure -> $OUT_DLLS"
+# mingw ldd cannot trace PE binaries; the import table via objdump is the
+# source of truth. The worklist fixpoints: a copied DLL's own imports
+# ride too (libopenblas -> libgfortran -> libquadmath ...).
+worklist=("$OUT_SITE"/*/*.pyd "$OUT_SITE"/*/*.dll)
+declare -A seen=()
+for pass in 1 2 3 4 5 6; do
+  add=()
+  for bin_path in "${worklist[@]}"; do
+    [ -f "$bin_path" ] || continue
+    for dll in $(objdump -p "$bin_path" | awk '/DLL Name:/ {print $NF}'); do
+      [ -z "${seen[$dll]:-}" ] || continue
+      resolved="$(ls /ucrt64/bin/"$dll" 2>/dev/null || true)"
+      if [ -z "$resolved" ]; then
+        # msys2 ships versioned sonames (an import of libxml2.dll is the
+        # file libxml2-2.dll): match the stem with a version suffix.
+        resolved="$(find /ucrt64/bin -maxdepth 1 -name "${dll%.dll}-*.dll" 2>/dev/null | head -1 || true)"
+      fi
+      if [ -n "$resolved" ]; then
+        seen["$dll"]=1
+        cp "$resolved" "$OUT_DLLS/"
+        add+=("$resolved")
+      else
+        echo "  system/unmet: $dll (no /ucrt64 provider — the OS loader's own set)"
+      fi
+    done
+  done
+  [ ${#add[@]} -gt 0 ] || break
+  worklist=("${add[@]}")
+done
+echo "dll closure: $(ls "$OUT_DLLS" | wc -l | tr -d ' ') providers"
+
+step "record the prebuilt set -> $LOCK"
+mkdir -p "$FEEDSTOCK/closure"
+{
+  echo "# $(recipe name) windows-ucrt staging record — pacman -Q of the msys2 prebuilt set"
+  echo "# (the POSIX locks are hash-INPUTS fetched from PyPI; the windows lock is a"
+  echo "#  RECORD of the signed prebuilt packages pacman installed — pacman's own"
+  echo "#  signature verification is the trust anchor. Generated by tools/stage_msys2.)"
+  for pkg in $packages; do pacman -Q "$pkg"; done | sort
+} > "$LOCK"
+grep -q python-numpy "$LOCK" || die "the record carries no numpy package — staging drifted"
+echo "lock: $LOCK ($(grep -c . "$LOCK") packages)"

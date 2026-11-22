@@ -1,0 +1,61 @@
+schema_version: 1
+# Payload manifest for pydata (spec 03 §2.2; filled by tools/build).
+identity:
+  schema_version: 1
+  kind: app
+  name: "pydata"
+  version: "@@VERSION@@"
+  producer: {tool: feedstock-build, tool_version: "1"}
+  created: "@@CREATED@@"                      # pinned at release time
+  source:
+    # src_sha256 omitted: PyPI closure (per-artifact hashes, see recipe)
+    commit: "@@FEEDSTOCK_SHA@@"
+    builder: "@@BUILDER@@"                    # "gha:run:<id>" on CI builds
+  digest:
+    tree_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"  # placeholder until the CAS lands (spec 03)
+    blob_sha256: "@@BLOB_SHA256@@"
+  signing: {state: unsigned}
+  encryption: {state: none}
+  annotations:
+    toolkit: "numpy+pandas+matplotlib"
+provides:
+  entrypoints:
+    - name: pydata
+      path: /bin/pydata
+      args_default: []
+      runtime_requirement:
+        engine: python
+        # spec 28 §8's native law: an abi in force REQUIRES the
+        # implementation named (an ABI is per-implementation by
+        # construction; cpython is the python implementation of record).
+        implementation: cpython
+        # native-extension payload (numpy/pandas/matplotlib compiled
+        # members staged per triplet): the ABI line of the staging
+        # runtime, per spec 05 §5 — the version line (constraint) AND the
+        # platform line (abi, filled by tools/build from the staging
+        # runtime's OWN .abi sidecar — the factory is the single owner).
+        constraint: "~> 3.14.0"
+        abi: "@@ABI@@"
+  platforms: []                   # filled by tools/build from Tebakofile (the
+                                  # leg's triplet; the template stays parseable)
+  capabilities: {exec: true, read: true}
+requires:
+  # The provider's kind: language edge (spec 03 §8).
+  - kind: language
+    engine: python
+    constraint: "~> 3.14.0"
+# spec 26 payload checks — the payload carries its own compile test.
+checks:
+  version:
+    entry: /bin/pydata
+    argv: ["--version"]
+    expect: {exit: 0}
+    timeout: 60
+  analyze:
+    # the scripted-analysis render: CSV in the fixtures image → summary on
+    # stdout + a matplotlib PNG in the scratch dir, all inside the image
+    entry: /bin/pydata
+    argv: ["analyze", "--out", "{scratch}/sample.png", "{scratch}/sample.csv"]
+    fixtures: /__tpkg__/check/analyze
+    expect: {exit: 0, files: ["sample.png"]}
+    timeout: 180

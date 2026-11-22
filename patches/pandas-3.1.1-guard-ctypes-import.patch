@@ -1,0 +1,19 @@
+--- a/lib/python/site-packages/pandas/errors/__init__.py
++++ b/lib/python/site-packages/pandas/errors/__init__.py
+@@ -5,7 +5,15 @@
+ from __future__ import annotations
+ 
+ import abc
+-import ctypes
++try:
++    import ctypes
++except ModuleNotFoundError:
++    # tebako deviation B: the POSIX tebako python runtime's hermetic core
++    # ships no _ctypes (the factory's DISABLED_MODULES; windows-msys
++    # re-enables it). pandas touches ctypes only in
++    # PyperclipWindowsException.__init__ below -- a windows-only clipboard
++    # path that POSIX never raises.
++    ctypes = None
+ 
+ from pandas._config.config import OptionError
+ 

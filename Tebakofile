@@ -1,0 +1,153 @@
+# Feedstock recipe for pydata
+# spec 13 §9 + docs/conventions.md in tebako-packages/index
+name: "pydata"
+kind: app
+summary: "pydata — the curated python data-science toolkit (numpy + pandas + matplotlib), pressed as one tebako payload on the tebako python runtime"
+
+upstream:
+  # A CURATED SET, not a single upstream package: the payload carries its
+  # OWN version (the toolkit line), and the member pins below are the
+  # requirements.in the locked closure resolves (tools/gen_closure is the
+  # pip analog of the metanorma feedstock's gen_closure — pip download
+  # with the leg's platform tags + --only-binary=:all:, then sha256 every
+  # artifact into closure/<version>-<triplet>.txt; source builds are
+  # NEVER a feedstock path, so an sdist-only member is a fail-closed
+  # named error, never a compile).
+  version: "0.1.0"
+  members:
+    - {pypi: "numpy", version: "2.5.5"}       # PyPI latest, 2026-11-22
+    - {pypi: "pandas", version: "3.1.1"}      # PyPI latest, 2026-11-22
+    - {pypi: "matplotlib", version: "3.11.2"} # PyPI latest, 2026-11-22
+  source: "https://pypi.org"
+  # Member floors: numpy requires_python >= 3.12, pandas/matplotlib >= 3.11
+  # (PyPI-verified 2026-11-22); all three ship cp314 wheels for
+  # manylinux_{2_17..}/musllinux, macosx_11_0+ (arm64/x86_64/universal2),
+  # and win_amd64. The MANIFEST's runtime edge is the ABI line (~> 3.14.0),
+  # not any range — the payload carries compiled members (numpy's BLAS
+  # core, pandas' cython members, matplotlib's ft2font/kiwisolver/
+  # contourpy/pillow), so spec 05 §5's native-extension law applies:
+  # wrong line = named error, never a segfault.
+
+build:
+  system: pipstage         # stage a pip --target closure with a tebako runtime's own python
+  runtime:
+    engine: python
+    version: "3.14.7"      # the staging + exec runtime (the ONE line every leg
+                           # rides — the ABI edge stays uniform: the factory's
+                           # windows-ucrt64 runtime exists only on the 3.14 line)
+    tebako: "0.3.5"        # the runtime package's <ver> (the factory's VERSION)
+                           # — the post-tebako#716 naming era
+                           # (tebako-runtime-<ver>-python-<py>-<host>) with
+                           # per-package manifest shards + .sha256 sidecars +
+                           # OpenPGP .asc signatures + the .tfs.blksum facet;
+                           # the windows package is exe + .dll + .tfs and the
+                           # msys env image grants `windows_boot: materialize`,
+                           # so a windows payload boots on its own platform.
+    # RELEASE CHANNEL: the staging runtime and the CI test legs resolve the
+    # factory RELEASE — tools/stage_runtime's release channel enumerates the
+    # pinned tag's shards (gh release view), fetches the assets each shard
+    # names, verifies every staged byte three ways (per-asset .sha256
+    # sidecar ↔ staged bytes ↔ the shard's own digest fields + the filename
+    # identity), and derives the TRIMMED manifest.json + SHA256SUMS.txt into
+    # a file:// runtime mirror (spec 05 §2's download-base shape). NEVER a
+    # hand-installed python.
+    channel: release       # release (published factory tag) | run-artifacts (pre-publish proof builds)
+    release: "v0.3.5"      # the factory release tag (release channel)
+  # The closure's native members (the three flagship packages plus their
+  # compiled transitive deps — contourpy, kiwisolver, pillow): staged from
+  # PyPI wheels matching the staging runtime's ABI tag (cp314) and the
+  # leg's triplet. Source builds of native members are NEVER a feedstock
+  # path (audience law 1–3): gen_closure's --only-binary=:all: makes an
+  # sdist resolution a named failure, and the per-member wheel assertion
+  # below runs fail-closed.
+  native_members: ["numpy", "pandas", "matplotlib"]
+  # x86_64-windows-ucrt only: PyPI's win_amd64 wheels are MSVC-built and
+  # the msys2/ucrt cpython of the tebako windows runtime cannot load them
+  # (the xml2rfc lxml lesson — its compiled member stages from the msys2
+  # package for the same reason), and PyPI publishes NO mingw wheels.
+  # numpy/pandas/matplotlib are ALL compiled, so the windows leg stages
+  # the whole stack from msys2's PREBUILT ucrt64 packages via pacman
+  # (never a source build — pacman delivers signed binaries, the same
+  # audience-law reading as the runtime factory's own windows support
+  # set). tools/stage_msys2 copies the packages' site-packages members +
+  # their PE import closure; tools/build assembles from that tree.
+  windows_msys:
+    python: "3.14"         # the msys2 ucrt64 python line — asserted against
+                           # the runtime's ABI line (fail closed on drift)
+    members:
+      - "mingw-w64-ucrt-x86_64-python-numpy"
+      - "mingw-w64-ucrt-x86_64-python-pandas"
+      - "mingw-w64-ucrt-x86_64-python-matplotlib"
+    # The transitive python deps the members import (pacman resolves them
+    # as dependencies; stage_msys2 stages their site-packages entries
+    # too). Drift from the real dep set fails loudly at the conformance
+    # arms (import errors are named), never silently.
+    closure_members:
+      - "mingw-w64-ucrt-x86_64-python-contourpy"
+      - "mingw-w64-ucrt-x86_64-python-cycler"
+      - "mingw-w64-ucrt-x86_64-python-dateutil"
+      - "mingw-w64-ucrt-x86_64-python-fonttools"
+      - "mingw-w64-ucrt-x86_64-python-kiwisolver"
+      - "mingw-w64-ucrt-x86_64-python-packaging"
+      - "mingw-w64-ucrt-x86_64-python-pillow"
+      - "mingw-w64-ucrt-x86_64-python-pyparsing"
+      - "mingw-w64-ucrt-x86_64-python-pytz"
+      - "mingw-w64-ucrt-x86_64-python-six"
+      - "mingw-w64-ucrt-x86_64-python-tzdata"
+
+platforms:
+  # The second flagship's three desktop triplets (TODO.sota2/05): the
+  # POSIX pair rides the PyPI wheel closure; the windows-ucrt leg rides
+  # the factory's materialize tier + the msys2 prebuilt staging above.
+  - aarch64-macos
+  - x86_64-linux-gnu
+  - x86_64-windows-ucrt
+
+provides:
+  entrypoints:
+    - {name: "pydata", path: "/bin/pydata", version: "0.1.0"}
+  executables: []          # no host-tier executables: the console script
+                           # needs the interpreter (spec 32's spawn form)
+
+ci:
+  # The leg topology (host runner per triplet). No container legs in this
+  # increment: the linux-gnu leg is host-native (this feedstock compiles
+  # nothing — pipstage fetches wheels), macos + windows runner-native.
+  hosts:
+    aarch64-macos: "macos-14"
+    x86_64-linux-gnu: "ubuntu-22.04"
+    x86_64-windows-ucrt: "windows-latest"
+  containers: {}
+
+tools:
+  repo: "tamatebako/tebako"
+  release: "v2.8.83"          # pinned against the release's own SHA256SUMS
+                              # (every pin below is verified two ways in CI:
+                              # Tebakofile pin ↔ downloaded bytes ↔ release
+                              # SHA256SUMS entry). The windows assets carry
+                              # the .exe suffix.
+  sha256:
+    tebako:
+      macos-arm64: "c49c57d0cebbe9a547b4e1f30782b68123560d011190e9207c4db0c57b215fb9"
+      linux-gnu-x86_64: "6c046d0207895566acf02d2cf3990e4f0a3a82f2ea3961473b476c99a72fa932"
+      windows-ucrt64: "5b2ba381a59c0efbb97c69c864a26cae6736e7fd902f10f7ec49153ec039055b"
+    tfs:
+      macos-arm64: "a8c5481736801f72cd9c3da648ec208601187ac4335e19086bb5ea28c203feed"
+      linux-gnu-x86_64: "126777314d562d74b8ff7aacc33256dc2fa0e248e7b6d914eac29679ddd728b2"
+      windows-ucrt64: "a965052e5ccc6e9589b17b4004d3b645650fb08cd16e34bf9b0651d882d24fdf"
+    tebako-pkg:
+      macos-arm64: "6369f39af7cc634aa8aa2942b1cefb661a64445898bd88d697316e35fbcfe5e4"
+      linux-gnu-x86_64: "0c2c04ab0678eb8badf23128f579a9d66f037a115ae373ea191f63d3ce20f4e9"
+      windows-ucrt64: "4a1ef74da0eaff16f038067ab360c0d5a4eb9b79d929cb722c48ce133572bbd5"
+    tebako-shim:
+      macos-arm64: "5218004513366aefe6ee85c6630f93f6e52bfb763d8af7b5dba45d402a9b86d3"
+      linux-gnu-x86_64: "d7666ada6951f434d912e035bd91a2dcde583cc7a66b2a53159161c2c8310186"
+      windows-ucrt64: "ac902e2679f908bf82d5205abca216416ee59815cea3c891658a50eba1d8c393"
+
+# Signing (spec 09 §9; the metanorma/xml2rfc pattern): declared NOW so the
+# first publish (the next increment) signs from day one; the publish step
+# stages the org secret TEBAKO_CI_SIGNING_KEY into the publisher home.
+signing:
+  keyid: "efc3c250f7862a48" # 2026-09-09 tamatebako root primary (low 64)
+
+schema_version: 1

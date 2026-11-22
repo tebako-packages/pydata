@@ -1,0 +1,208 @@
+name: build-payload
+# Feedstock build: recipe → per-triplet legs → boot-smoke + spec-26 checks
+# + the three conformance arms. Conventions: docs/conventions.md in
+# tebako-packages/index.
+#
+# The second flagship payload (TODO.sota2/05): a curated python
+# data-science toolkit (numpy + pandas + matplotlib, kind: app) on the
+# tebako-runtime-python 3.14.7 line — the one line every leg rides, so
+# the ABI edge stays uniform across the matrix (the factory's
+# windows-ucrt64 runtime exists only on the 3.14 line).
+#
+# Legs (the three desktop triplets of this increment):
+#   aarch64-macos        host-native pipstage (macosx_* cp314 wheels)
+#   x86_64-linux-gnu     host-native pipstage (manylinux_* cp314 wheels)
+#   x86_64-windows-ucrt  runner-native; PyPI's win_amd64 wheels are
+#                        MSVC-built and the ucrt runtime is a mingw
+#                        cpython that cannot load them (gen_closure
+#                        refuses the leg by name), so the stack stages
+#                        from msys2's PREBUILT ucrt64 packages
+#                        (tools/stage_msys2 — never a source build), and
+#                        the boot rides the factory's materialize tier.
+#
+# Every leg then runs: tools/boot_smoke (tfs image assertions + extract
+# round-trip + the spec-26 `tebako check` gate + the manual spec-17
+# dispatch smoke) and tools/conformance (the three named arms: mount
+# layout, __file__ data, multiprocessing spawn — each under a hard
+# deadline, a hang fails by name).
+#
+# Publish: NOT in this increment (named next: the publish workflow +
+# registry rows + the public comparison page). Push/PR/dispatch runs
+# build + gate only.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# One run per branch/PR-head at a time (push + pull_request would
+# otherwise double-run); a new run cancels the stale one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Every run block is bash (set -euo pipefail). On windows-latest the
+# default shell is pwsh and every step would break — git-bash on the
+# windows runner provides curl/sha256sum/ruby. The msys2 arms stay
+# triplet-gated (the POSIX legs never enter them).
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    name: Compute the leg matrix
+    runs-on: ubuntu-latest
+    outputs:
+      legs: ${{ steps.emit.outputs.legs }}
+      leg_count: ${{ steps.emit.outputs.leg_count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: emit
+        run: |
+          set -euo pipefail
+          legs=$(ruby tools/pins.rb --matrix)
+          count=$(ruby -rjson -e 'puts JSON.parse(STDIN.read)["include"].length' <<< "$legs")
+          { echo "legs=$legs"; echo "leg_count=$count"; } >> "$GITHUB_OUTPUT"
+          echo "plan: $count legs"
+          ruby -rjson -e 'JSON.parse(STDIN.read)["include"].each { |l| puts "  #{l["triplet"]} on #{l["host"]}" }' <<< "$legs"
+
+  build:
+    name: ${{ matrix.triplet }}
+    needs: plan
+    # An unguarded empty matrix poisons the run conclusion.
+    if: needs.plan.outputs.leg_count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.legs) }}
+    runs-on: ${{ matrix.host }}
+    env:
+      TRIPLET: ${{ matrix.triplet }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the toolchain pins (Tebakofile is the SSOT)
+        run: ruby tools/pins.rb ${{ matrix.tool_platform }} --env >> "$GITHUB_ENV"
+
+      - name: Fetch tebako CLI tools (pinned by Tebakofile, sha256-verified)
+        # tebako + tfs (the imager is `tfs mkimage`); tebako-pkg/tebako-shim
+        # stay pinned for the future press/publish but are not leg inputs.
+        # The pins are cross-checked against the release's own SHA256SUMS
+        # (both anchored).
+        run: |
+          set -euo pipefail
+          mkdir -p .tools && cd .tools
+          base="https://github.com/tamatebako/tebako/releases/download/$TEBAKO_RELEASE"
+          # -fsSL + retries: a transient TLS/HTTP flake fails loudly with
+          # error text, never a silent error page the sha pin then rejects.
+          curl -fsSLO --retry 5 --retry-all-errors --retry-delay 3 "$base/$TEBAKO_ASSET"
+          curl -fsSLO --retry 5 --retry-all-errors --retry-delay 3 "$base/$TFS_ASSET"
+          curl -fsSLO --retry 5 --retry-all-errors --retry-delay 3 "$base/SHA256SUMS"
+          echo "$TEBAKO_SHA256  $TEBAKO_ASSET" > SHA256PINS
+          echo "$TFS_SHA256  $TFS_ASSET" >> SHA256PINS
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum -c SHA256PINS; else shasum -a 256 -c SHA256PINS; fi
+          for pair in "$TEBAKO_ASSET:$TEBAKO_SHA256" "$TFS_ASSET:$TFS_SHA256"; do
+            asset="${pair%%:*}"; want="${pair##*:}"
+            got=$(awk -v a="$asset" '$2 == a {print $1}' SHA256SUMS)
+            [ "$got" = "$want" ] || { echo "::error::pin mismatch for $asset: Tebakofile=$want release=${got:-ABSENT}"; exit 1; }
+          done
+          chmod 755 "$TEBAKO_ASSET" "$TFS_ASSET"
+          mv "$TEBAKO_ASSET" tebako
+          mv "$TFS_ASSET" tfs
+
+      - name: Stage the pinned python runtime (file:// mirror, release channel)
+        # gh needs contents:read on the FACTORY repo (public) — the org
+        # PAT, not the run's GITHUB_TOKEN. Stages only THIS leg's
+        # platform package (HOST_IDS filter) into out/runtime-mirror.
+        env:
+          GH_TOKEN: ${{ secrets.TEBAKO_CI_PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: HOST_IDS="${{ matrix.tool_platform }}" tools/stage_runtime
+
+      - name: Generate the closure (POSIX legs; only when the committed lock is absent)
+        # The committed closure/<version>-<triplet>.txt is the build input.
+        # A leg regenerates in-leg when its lock is missing (the generator
+        # is the staged runtime's own pip — never the runner's python);
+        # maintainers commit the locks before a release tag.
+        if: matrix.triplet != 'x86_64-windows-ucrt'
+        run: |
+          set -euo pipefail
+          lock="closure/$PKG_VERSION-$TRIPLET.txt"
+          if [ -s "$lock" ]; then
+            echo "committed closure present: $lock"
+          else
+            tools/gen_closure
+            echo "LOCK_GENERATED=$lock" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload a regenerated closure lock (POSIX legs, branch runs only)
+        if: env.LOCK_GENERATED != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: closure-lock-${{ matrix.triplet }}
+          path: ${{ env.LOCK_GENERATED }}
+          retention-days: 30
+
+      - name: Set up msys2 (windows-ucrt only)
+        if: matrix.triplet == 'x86_64-windows-ucrt'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          release: false
+          install: >-
+            binutils
+
+      - name: Stage the msys2 prebuilt stack (windows-ucrt only)
+        # pacman install + site-packages staging + the PE import closure +
+        # the staging record (tools/stage_msys2 owns the member list — the
+        # recipe is the SSOT). Runs under the UCRT64 shell.
+        if: matrix.triplet == 'x86_64-windows-ucrt'
+        shell: msys2 {0}
+        run: tools/stage_msys2
+
+      - name: Upload the windows staging record
+        if: matrix.triplet == 'x86_64-windows-ucrt'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: closure-record-${{ matrix.triplet }}
+          path: closure/${{ env.PKG_VERSION }}-${{ matrix.triplet }}.txt
+          retention-days: 30
+
+      - name: Build the payload
+        env:
+          TFS_CLI: ${{ github.workspace }}/.tools/tfs
+        run: tools/build
+
+      - name: Boot-smoke + payload checks
+        # tools/boot_smoke = tfs in-image assertions + extract round-trip
+        # + `tebako check` (the spec-26 press-time gate; FAIL is the
+        # engine's named exit 79) + the manual spec-17 dispatch smoke.
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1090  # the leg's runtime.env is written by tools/build
+          . "out/$TRIPLET/runtime.env"
+          set +a
+          TFS="$GITHUB_WORKSPACE/.tools/tfs" TEBAKO="$GITHUB_WORKSPACE/.tools/tebako" \
+            bash tools/boot_smoke "$PAYLOAD_IMG"
+
+      - name: Conformance arms (mount layout, __file__ data, mp spawn)
+        # The second flagship's three named cases (TODO.sota2/05 arc 2),
+        # each under a hard deadline — a hang fails the arm by name.
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1090
+          . "out/$TRIPLET/runtime.env"
+          set +a
+          bash tools/conformance "$PAYLOAD_IMG"
+
+      - name: Stage artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.triplet }}
+          path: out/${{ matrix.triplet }}/

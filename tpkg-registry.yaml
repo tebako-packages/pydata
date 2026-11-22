@@ -1,0 +1,5 @@
+schema_version: 1
+# The pydata package registry (spec 04 §2) — filled at first publish (the
+# next increment: the publish workflow + the registry rows land together,
+# signed per the Tebakofile signing: block).
+payloads: []
