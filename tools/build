@@ -199,7 +199,7 @@ else
     patch -p1 -F0 -d "$PAYLOAD" < "$PATCH_FILE" || die "deviation B patch failed (zero fuzz) — pandas $PANDAS_V's errors/__init__.py drifted; review the patch"
     step "applied deviation B: $PATCH_FILE (the POSIX runtime ships no _ctypes)"
   fi
-else
+fi
 
 # --------------------------------------------------------- payload tree
 step "assemble the payload tree"
@@ -274,6 +274,11 @@ IMG="$OUT/$PKG_NAME-$VERSION-$ASSET_PLATFORM.tfs"
 rm -f "$IMG"
 "$TFS_CLI" mkimage "$PAYLOAD" --output "$IMG"
 sha="$(sha256_file "$IMG")"
+# The store-sidecar shape (spec 05 §3: "<sha256>  <name>") next to the
+# image — the trust anchor the store materializes, and the dlcache's
+# content key (a rebuilt image never serves a stale extraction; without
+# the sidecar a dev boot keys on the PATH and serves stale entries).
+printf '%s  %s\n' "$sha" "$(basename "$IMG")" > "$IMG.sha256"
 echo "image: $IMG"
 echo "sha256: $sha"
 echo "PAYLOAD_IMG=$IMG" >> "$OUT/runtime.env"

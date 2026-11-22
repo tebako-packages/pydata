@@ -96,6 +96,42 @@ public comparison page) is the next increment — named, not shipped.
    sample.csv → summary + PNG), carried in the manifest — the payload
    ships its own compile test.
 
+## Deviations (each with its owner and removal condition)
+
+A. *(none yet — reserved to keep the lettering stable with the sibling
+   feedstocks)*
+
+B. **pandas ctypes guard (`patches/pandas-3.1.1-guard-ctypes-import.patch`).**
+   The POSIX tebako python runtime's hermetic core ships no `_ctypes`
+   (the factory's `DISABLED_MODULES`; windows-msys re-enables it), while
+   pandas 3.1.1 imports `ctypes` at module level in
+   `pandas/errors/__init__.py` (used only by `PyperclipWindowsException`
+   — a windows-only clipboard path) and in
+   `pandas/core/interchange/from_dataframe.py` (used only inside
+   `buffer_to_ndarray` — the dataframe-interchange protocol, never on
+   the payload's own paths). The patch guards both imports
+   (`try/except ModuleNotFoundError`, `ctypes = None`), applied by
+   tools/build ONLY when a probe of the staged runtime confirms the
+   absence (zero fuzz — a drifted pandas fails the leg loudly). The
+   patch never lands on the windows leg (msys cpython ships `_ctypes`,
+   probe-verified). **Owner: the runtime factory — ship `_ctypes` on
+   POSIX (static libffi, the windows-msys pattern) or prune the ctypes
+   python side so the absence is a clean "no such module". Remove this
+   patch when the feedstock's runtime floor ships `_ctypes` on POSIX
+   (tools/build's probe then prints the removal notice).**
+
+## Operational note: the exec-cache dlcache and rebuilt images
+
+On macOS the driver's persistent dlcache keys a mount's materialized
+files on the image's `.sha256` sidecar when present, else on the image's
+PATH (a dev boot). `tools/build` therefore writes
+`<image>.tfs.sha256` (the store-sidecar shape) next to every image it
+presses — a rebuilt image keys differently and never serves a stale
+extraction. Without the sidecar, re-pressing the same path and
+re-dispatching on the same host serves the previous build's cached
+files (observed in rehearsal: an edited conformance arm ran its old
+bytes until the cache was cleared).
+
 ## Layout (tebako-packages/index `templates/feedstock/` + conventions)
 
 - `Tebakofile` — member pins, pipstage runtime block, native members,
