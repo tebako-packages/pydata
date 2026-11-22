@@ -1,0 +1,13 @@
+city,month,rain_mm,mean_c
+alpha,1,78,4.2
+alpha,2,64,5.1
+alpha,3,59,8.8
+alpha,4,71,12.4
+alpha,5,83,16.9
+alpha,6,92,20.3
+beta,1,45,6.0
+beta,2,38,7.3
+beta,3,41,10.1
+beta,4,55,14.8
+beta,5,66,19.2
+beta,6,70,22.5

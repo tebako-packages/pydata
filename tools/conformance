@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# tools/conformance <image.tfs> — the second flagship's three named
+# conformance cases (TODO.sota2/05 arc 2), run through the pinned tebako
+# python runtime against the built payload image:
+#
+#   arm1  mount layout  — the manylinux/macOS wheel layout survives
+#        mounting: a numpy import + BLAS compute inside the mounted image
+#        (its bundled shared libraries load through the VFS).
+#   arm2  __file__ data — the bundled sample CSV is read through a path
+#        derived from __file__ in the mounted context, byte-verified
+#        against the build-time digest.
+#   arm3  mp spawn      — multiprocessing's spawn context re-execs
+#        sys.executable; a Pool(2).map must RETURN, never hang (the
+#        interpreter re-exec edge). Each arm runs under a hard deadline:
+#        a wedge fails the arm BY NAME instead of wedging CI (the
+#        factory boot_smoke's CLOCK_MONOTONIC discipline).
+#
+# Env: RUNTIME (the runtime exe), RUNTIME_IMAGE (the env .tfs) —
+# tools/build writes both into out/<triplet>/runtime.env. ARM_TIMEOUT
+# (seconds, default 300) bounds every arm.
+set -euo pipefail
+
+IMG="${1:?usage: tools/conformance <image.tfs>}"
+RUNTIME="${RUNTIME:?set RUNTIME to the tebako runtime exe (tools/build writes out/<triplet>/runtime.env)}"
+RUNTIME_IMAGE="${RUNTIME_IMAGE:?set RUNTIME_IMAGE to the runtime env .tfs}"
+ARM_TIMEOUT="${ARM_TIMEOUT:-300}"
+
+FEEDSTOCK="$(cd "$(dirname "$0")/.." && pwd)"
+if command -v cygpath >/dev/null 2>&1; then
+  # Git Bash: the native runtime exe receives arguments verbatim (MSYS2's
+  # conversion would rewrite the in-image spellings into host paths) —
+  # suppress it and hand host paths windows-form spellings (inert on
+  # POSIX; the boot_smoke pattern).
+  export MSYS2_ARG_CONV_EXCL="*"
+  IMG="$(cygpath -m "$IMG")"
+  RUNTIME="$(cygpath -m "$RUNTIME")"
+  RUNTIME_IMAGE="$(cygpath -m "$RUNTIME_IMAGE")"
+fi
+
+ARM_DIR="/lib/python/site-packages/pydata_toolkit/conformance"
+
+# run_arm <name> <in-image entry> — spec-17 dispatch under a hard
+# deadline: the dispatch runs in the background, the waiter polls once a
+# second and kills the whole tree on expiry (kill -9: a wedged child
+# answers nothing weaker).
+run_arm() {
+  local name="$1" entry="$2"
+  echo "== $name"
+  local log; log="$(mktemp)"
+  TEBAKO_RUNTIME_IMAGE="$RUNTIME_IMAGE" \
+    "$RUNTIME" "--tebako-image=$IMG:-:/" "--tebako-entry=$entry" >"$log" 2>&1 &
+  local pid=$!
+  local waited=0 rc=""
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$ARM_TIMEOUT" ]; then
+      echo "arm $name: DEADLINE EXCEEDED (${ARM_TIMEOUT}s) — killing the tree; a hang is a FAILED arm, never a wedged run" >&2
+      kill -9 "$pid" 2>/dev/null || true
+      # The spawn arm's children outlive their parent's death on POSIX;
+      # sweep by the entry's marker (best effort, never silent).
+      pkill -9 -f "$entry" 2>/dev/null || true
+      cat "$log" >&2 || true
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid" && rc=0 || rc=$?
+  cat "$log"
+  if [ "$rc" != 0 ]; then
+    echo "arm $name: exit $rc" >&2
+    return "$rc"
+  fi
+  grep -q "$(echo "$name" | cut -d' ' -f1 | tr 'a-z' 'A-Z')-OK" "$log" || {
+    echo "arm $name: the OK marker is absent from the log" >&2
+    return 1
+  }
+}
+
+run_arm "arm1 mount layout" "$ARM_DIR/arm1_mount_layout.py"
+run_arm "arm2 __file__ data" "$ARM_DIR/arm2_file_data.py"
+run_arm "arm3 mp spawn" "$ARM_DIR/arm3_mp_spawn.py"
+
+echo "CONFORMANCE-OK (3 arms)"

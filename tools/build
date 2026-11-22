@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# tools/build — assemble the pydata payload tree and image it.
+#
+# POSIX legs (aarch64-macos, x86_64-linux-gnu): the pipstage — install the
+# locked PyPI closure with the STAGED tebako python runtime's OWN
+# interpreter (dogfood — never the runner's python, never a hand-installed
+# one): closure/<version>-<triplet>.txt → a hash-pinned requirements file;
+# pip fetches every artifact from PyPI and verifies it against the lock's
+# sha256 (--require-hashes — a drifted PyPI byte is a pip hash failure,
+# named, never installed); pip install --target → the payload's
+# /lib/python/site-packages.
+#
+# x86_64-windows-ucrt: PyPI's win_amd64 wheels are MSVC-built and the
+# ucrt runtime cannot load them (gen_closure refuses the leg by name) —
+# the site-packages tree comes from tools/stage_msys2's prebuilt msys2
+# staging (out/msys2-site + out/msys2-dlls), the same audience-law
+# reading as the xml2rfc lxml precedent.
+#
+# Then (both paths): the payload's /bin/pydata console stub is generated
+# from templates/bin/pydata (pip's --target bin/ scripts carry dead
+# build-prefix shebangs — the xml2rfc decision), the toolkit package
+# rides from templates/, the arm-2 conformance script's bundled-CSV
+# digest constant is filled from the staged tree, the manifest's @@…@@
+# are filled (embedded at /__tpkg__/manifest.yaml — tier 1,
+# authoritative), and the tree is imaged with tfs mkimage (default
+# limnifs — the format the runtime factory itself ships).
+#
+# Inputs (env, defaults from Tebakofile — the SSOT; no literals here):
+#   TRIPLET   one of Tebakofile platforms (default: aarch64-macos)
+#   MIRROR    tools/stage_runtime's output (default: out/runtime-mirror)
+#   TFS_CLI   the pinned tfs binary (default: tfs on PATH)
+#   WORK/OUT  build workspace / artifact dir (out/work-<triplet>, out/<triplet>)
+#
+# Produces: $OUT/pydata-<version>-<asset-platform>.tfs +
+# pydata-<version>.manifest.yaml + runtime.env (boot_smoke/conformance input).
+set -euo pipefail
+
+FEEDSTOCK="$(cd "$(dirname "$0")/.." && pwd)"
+# Native windows tools (ruby, the runtime exe, the tfs CLI) cannot read
+# Git Bash's POSIX path spellings — FEEDSTOCK goes windows-form where
+# cygpath exists (inert on POSIX; the stage_runtime pattern).
+if command -v cygpath >/dev/null 2>&1; then FEEDSTOCK="$(cygpath -m "$FEEDSTOCK")"; fi
+recipe() { ruby -ryaml -e "puts(YAML.load_file('$FEEDSTOCK/Tebakofile').dig(*ARGV) || '')" "$@"; }
+
+PKG_NAME="$(recipe name)"
+VERSION="${VERSION:-$(recipe upstream version)}"
+TRIPLET="${TRIPLET:-aarch64-macos}"
+PY_V="${PY_V:-$(recipe build runtime version)}"
+RT_TEBAKO="${RT_TEBAKO:-$(recipe build runtime tebako)}"
+MIRROR="${MIRROR:-$FEEDSTOCK/out/runtime-mirror}"
+TFS_CLI="${TFS_CLI:-tfs}"
+WORK="${WORK:-$FEEDSTOCK/out/work-$TRIPLET}"
+OUT="${OUT:-$FEEDSTOCK/out/$TRIPLET}"
+CLOSURE="$FEEDSTOCK/closure/$VERSION-$TRIPLET.txt"
+
+step() { printf '\n== %s\n' "$*"; }
+die() { echo "build: $*" >&2; exit 1; }
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# triplet -> host_id (Platform::HOST_IDS) + the release-asset platform
+# form (spec 03 §3) — identical on the POSIX six and windows-ucrt64; kept
+# as two names so a divergence fails loudly instead of mis-naming an
+# artifact.
+case "$TRIPLET" in
+  x86_64-linux-gnu)  HOST_ID=linux-gnu-x86_64 ;;
+  aarch64-linux-gnu) HOST_ID=linux-gnu-arm64 ;;
+  x86_64-linux-musl) HOST_ID=linux-musl-x86_64 ;;
+  aarch64-linux-musl) HOST_ID=linux-musl-arm64 ;;
+  x86_64-macos)      HOST_ID=macos-x86_64 ;;
+  aarch64-macos)     HOST_ID=macos-arm64 ;;
+  x86_64-windows-ucrt) HOST_ID=windows-ucrt64 ;;
+  *) die "unknown TRIPLET: $TRIPLET" ;;
+esac
+ASSET_PLATFORM="$HOST_ID"
+# The windows runtime exe carries the .exe suffix (the env image and the
+# .abi sidecar keep the suffixless stem on every platform).
+EXE_SFX=""
+case "$HOST_ID" in windows-*) EXE_SFX=".exe" ;; esac
+
+mkdir -p "$WORK" "$OUT"
+
+# ------------------------------------------------------- staged runtime
+step "staged tebako python $PY_V runtime (tebako $RT_TEBAKO, $HOST_ID)"
+# era-2 naming (tebako#716): the python language segment rides the name.
+RT_STEM="$MIRROR/v$RT_TEBAKO/tebako-runtime-$RT_TEBAKO-python-$PY_V-$HOST_ID"
+RT_EXE="$RT_STEM$EXE_SFX"
+RT_IMAGE="$RT_STEM.tfs"
+[ -x "$RT_EXE" ] || die "no staged runtime exe: $RT_EXE (run tools/stage_runtime first)"
+[ -f "$RT_IMAGE" ] || die "no staged runtime image: $RT_IMAGE"
+# The ABI edge (spec 05 §5) flows from the runtime's OWN .abi sidecar —
+# the factory is the single owner; a missing/empty sidecar is a named
+# error, never a re-derived guess.
+ABI_FILE="$RT_STEM.abi"
+[ -f "$ABI_FILE" ] || die "no abi sidecar next to the staged runtime: $ABI_FILE"
+ABI="$(tr -d '[:space:]' < "$ABI_FILE")"
+[ -n "$ABI" ] || die "empty abi sidecar: $ABI_FILE"
+echo "runtime: $RT_EXE"
+echo "abi edge: $ABI"
+
+# boot_smoke + tools/conformance read these (absolute: the spec-26 check
+# driver runs with cwd = its scratch dir — a relative spelling dies
+# there, the metanorma lesson).
+{ echo "RUNTIME=$RT_EXE"
+  echo "RUNTIME_IMAGE=$RT_IMAGE"; } > "$OUT/runtime.env"
+
+# ----------------------------------------------------- site-packages
+PAYLOAD="$WORK/payload"
+rm -rf "$PAYLOAD"
+mkdir -p "$PAYLOAD/bin" "$PAYLOAD/lib/python"
+
+if [ "$TRIPLET" = x86_64-windows-ucrt ]; then
+  # --------------------------------------- msys2 prebuilt staging (windows)
+  step "assemble site-packages from the msys2 prebuilt staging (out/msys2-site)"
+  MSYS_SITE="$FEEDSTOCK/out/msys2-site"
+  MSYS_DLLS="$FEEDSTOCK/out/msys2-dlls"
+  [ -d "$MSYS_SITE/numpy" ] || die "no msys2 staging at $MSYS_SITE (run tools/stage_msys2 under the UCRT64 shell first)"
+  cp -r "$MSYS_SITE" "$PAYLOAD/lib/python/site-packages"
+  # The mingw pyds' own dependency DLLs (openblas, the gfortran stack,
+  # freetype, ...) ride the payload's bin/ — a PATH lead at dispatch
+  # (spec 22 §3.2), and the loader ALSO resolves a pyd's dependencies
+  # against the pyd's OWN directory first (the stronger guarantee), so
+  # the closure lands beside the pyds too (the xml2rfc lxml pattern).
+  if compgen -G "$MSYS_DLLS/"*.dll > /dev/null; then
+    cp "$MSYS_DLLS/"*.dll "$PAYLOAD/bin/"
+    for member in numpy pandas matplotlib PIL kiwisolver contourpy; do
+      if [ -d "$PAYLOAD/lib/python/site-packages/$member" ]; then
+        cp "$MSYS_DLLS/"*.dll "$PAYLOAD/lib/python/site-packages/$member/" 2>/dev/null || true
+      fi
+    done
+    step "staged $(ls "$MSYS_DLLS/"*.dll | wc -l | tr -d ' ') mingw DLLs into the payload bin and beside the pyds"
+  else
+    die "the msys2 DLL closure is empty — stage_msys2's objdump walk found nothing (the stack is compiled; support DLLs must ride the payload)"
+  fi
+else
+  # -------------------------------------- hash-pinned requirements file
+  [ -f "$CLOSURE" ] || die "no closure file for $TRIPLET: $CLOSURE (run tools/gen_closure TRIPLET=$TRIPLET)"
+  step "closure -> hash-pinned requirements ($CLOSURE)"
+  REQS="$WORK/requirements-locked.txt"
+  : > "$REQS"
+  grep -v '^#' "$CLOSURE" | grep -v '^\s*$' | while read -r sha fname; do
+    case "$fname" in
+      *.whl) : ;;
+      *) die "non-wheel artifact in the closure: $fname (source builds are never a feedstock path)" ;;
+    esac
+    # wheel filename: {distribution}-{version}-{pytag}-{abitag}-{plattag}.whl —
+    # the first two dash-separated fields are the requirement's pin.
+    name="$(echo "$fname" | cut -d- -f1)"
+    ver="$(echo "$fname" | cut -d- -f2)"
+    [ -n "$name" ] && [ -n "$ver" ] || die "unparseable wheel filename in the closure: $fname"
+    echo "$name==$ver --hash=sha256:$sha" >> "$REQS"
+  done
+  echo "locked requirements: $(grep -c . "$REQS")"
+
+  # ------------------------------------------------------------ pipstage
+  step "pip install --target with the STAGED runtime's own interpreter"
+  TARGET="$WORK/stage"
+  rm -rf "$TARGET"
+  # NO -E here: the staged runtime's stdlib rides the DRIVER-set
+  # PYTHONHOME (the driver sets it from the effective mount root) — `-E`
+  # makes the interpreter ignore exactly that variable. Isolation from
+  # ambient PYTHON* state is the runtime driver's job, and it scrubs
+  # before the interpreter initializes (the xml2rfc decision).
+  TEBAKO_RUNTIME_IMAGE="$RT_IMAGE" \
+    "$RT_EXE" -m pip install \
+    --target "$TARGET" --no-cache-dir --require-hashes \
+    -r "$REQS" > "$WORK/pip.log" 2>&1 || {
+    tail -30 "$WORK/pip.log" >&2
+    die "pip staging FAILED (full log: $WORK/pip.log)"
+  }
+  grep -E "^Successfully installed" "$WORK/pip.log" | sed 's/^/  /'
+  # pip's --target bin/ scripts carry dead build-prefix shebangs (the
+  # xml2rfc decision) — the payload's /bin is generated below.
+  rm -rf "$TARGET/bin"
+  mv "$TARGET" "$PAYLOAD/lib/python/site-packages"
+
+  # Deviation B (README): the POSIX tebako python runtime's hermetic core
+  # ships no _ctypes (the factory's DISABLED_MODULES), and pandas 3.1.1
+  # imports ctypes at module level in pandas/errors/__init__.py — used
+  # only by PyperclipWindowsException, a windows-only clipboard path.
+  # Probe the RUNTIME (never assume): when ctypes is absent, apply the
+  # named guard patch (patches/, zero fuzz — a drifted pandas fails the
+  # leg loudly); when the runtime ships _ctypes (windows-msys does, and a
+  # future POSIX line may), the patch is unnecessary and the build says
+  # so — the removal condition of the deviation.
+  if TEBAKO_RUNTIME_IMAGE="$RT_IMAGE" "$RT_EXE" -c "import ctypes" >"$WORK/ctypes-probe.log" 2>&1; then
+    echo "::notice::the staged runtime ships _ctypes — patches/pandas-*-guard-ctypes-import.patch is unnecessary; remove it (deviation B closed)"
+  else
+    command -v patch >/dev/null 2>&1 || die "patch(1) missing — deviation B cannot apply"
+    PANDAS_V="$(ruby -ryaml -e 'puts YAML.load_file(ARGV[0]).dig("upstream", "members").find { |m| m["pypi"] == "pandas" }.fetch("version")' "$FEEDSTOCK/Tebakofile")"
+    PATCH_FILE="$FEEDSTOCK/patches/pandas-$PANDAS_V-guard-ctypes-import.patch"
+    [ -f "$PATCH_FILE" ] || die "no ctypes-guard patch for pandas $PANDAS_V ($PATCH_FILE) — the runtime ships no _ctypes and the member drifted"
+    patch -p1 -F0 -d "$PAYLOAD" < "$PATCH_FILE" || die "deviation B patch failed (zero fuzz) — pandas $PANDAS_V's errors/__init__.py drifted; review the patch"
+    step "applied deviation B: $PATCH_FILE (the POSIX runtime ships no _ctypes)"
+  fi
+else
+
+# --------------------------------------------------------- payload tree
+step "assemble the payload tree"
+# The toolkit's own package (authored payload content; templates/ is the
+# ONE source) rides over the staged closure.
+cp -r "$FEEDSTOCK/templates/lib/python/site-packages/pydata_toolkit" \
+  "$PAYLOAD/lib/python/site-packages/pydata_toolkit"
+# tr -d '\r': the checkout may be CRLF on windows and a shebang line
+# ending in CR fails exec ("bad interpreter").
+tr -d '\r' < "$FEEDSTOCK/templates/bin/pydata" > "$PAYLOAD/bin/pydata"
+chmod 755 "$PAYLOAD/bin/pydata"
+# The arm-2 conformance script's bundled-CSV digest constant is filled
+# from the staged tree — authored content, so the constant is stable and
+# a drifted data file fails at BUILD time.
+ARM2="$PAYLOAD/lib/python/site-packages/pydata_toolkit/conformance/arm2_file_data.py"
+RIVERS="$PAYLOAD/lib/python/site-packages/pydata_toolkit/data/rivers.csv"
+[ -f "$RIVERS" ] || die "the bundled data file is missing from the staged tree: $RIVERS"
+RIVERS_SHA="$(sha256_file "$RIVERS")"
+sed -i.bak "s|@@RIVERS_SHA256@@|$RIVERS_SHA|" "$ARM2" && rm -f "$ARM2.bak"
+grep -q '@@' "$ARM2" && die "unfilled @@…@@ placeholders remain in $ARM2"
+echo "bundled CSV: $RIVERS_SHA"
+
+# The declared command inventory (manifests/payload.yaml
+# provides.entrypoints — the ONE inventory) must match the staged tree:
+# every declared entrypoint exists. The pydata console stub is AUTHORED
+# (no dist-info owns it — the xml2rfc cross-check has no instance here);
+# the native members' presence is asserted instead (POSIX legs: their
+# dist-info dirs; windows: stage_msys2 already asserted the trees).
+ruby -ryaml -e 'YAML.load_file(ARGV[0]).fetch("provides").fetch("entrypoints").each { |e| puts "#{e.fetch("name")} #{e.fetch("path")}" }' \
+  "$FEEDSTOCK/manifests/payload.yaml" | while read -r cmdname cmdpath; do
+  # The runner's native windows ruby writes CRLF to the pipe — read -r
+  # keeps the CR, and a check against "path\r" fails the whole leg.
+  cmdname=${cmdname%$'\r'} cmdpath=${cmdpath%$'\r'}
+  [ -f "$PAYLOAD$cmdpath" ] || die "declared entrypoint $cmdpath not staged"
+done
+for m in $(recipe build native_members); do
+  [ -d "$PAYLOAD/lib/python/site-packages/$m" ] || die "native member $m missing from the staged site-packages"
+done
+echo "declared commands staged and verified; native members present"
+
+# ------------------------------------------------------------- manifest
+step "fill the manifest (embedded at /__tpkg__/manifest.yaml — tier 1)"
+MAN_EMBED="$PAYLOAD/__tpkg__/manifest.yaml"
+mkdir -p "$PAYLOAD/__tpkg__"
+# blob_sha256's fixed-point rule (spec 03 §7): the image cannot carry its
+# own digest — the embedded copy keeps the zero placeholder; the sibling
+# manifest (below) carries the real one for the release/registry tier.
+# git may check the manifest out with CRLF on windows — the embedded
+# copy must be LF or the entrypoint paths carry a trailing CR and the
+# driver opens "bin/pydata\r" (invisible in the rendered log).
+sed -e "s|@@VERSION@@|$VERSION|g" \
+    -e "s|@@CREATED@@|$(date -u +%Y-%m-%dT%H:%M:%SZ)|" \
+    -e "s|@@FEEDSTOCK_SHA@@|$(git -C "$FEEDSTOCK" rev-parse HEAD)|" \
+    -e "s|@@BUILDER@@|${GITHUB_RUN_ID:+gha:run:$GITHUB_RUN_ID}|" \
+    -e "s|@@ABI@@|$ABI|" \
+    -e "s|^  platforms: \[.*\]|  platforms: [$TRIPLET]|" \
+    -e "s|@@BLOB_SHA256@@|0000000000000000000000000000000000000000000000000000000000000000|" \
+    "$FEEDSTOCK/manifests/payload.yaml" | tr -d '\r' > "$MAN_EMBED"
+grep -q '@@' "$MAN_EMBED" && die "unfilled @@…@@ placeholders remain in the embedded manifest"
+echo "embedded manifest: $MAN_EMBED"
+
+# ------------------------------------------------------ check fixtures
+# spec 26 §1: the analyze check's fixtures image at
+# /__tpkg__/check/analyze/ (the engine materializes the dir's CONTENTS at
+# its scratch root).
+mkdir -p "$PAYLOAD/__tpkg__/check/analyze"
+cp "$FEEDSTOCK/fixtures/check/analyze/sample.csv" "$PAYLOAD/__tpkg__/check/analyze/sample.csv"
+
+# ---------------------------------------------------------------- image
+step "tfs mkimage (the in-process writer — default limnifs, the factory's own format)"
+IMG="$OUT/$PKG_NAME-$VERSION-$ASSET_PLATFORM.tfs"
+rm -f "$IMG"
+"$TFS_CLI" mkimage "$PAYLOAD" --output "$IMG"
+sha="$(sha256_file "$IMG")"
+echo "image: $IMG"
+echo "sha256: $sha"
+echo "PAYLOAD_IMG=$IMG" >> "$OUT/runtime.env"
+
+# ------------------------------------------------------ sibling manifest
+step "fill the sibling manifest (release tier: real blob sha)"
+MAN="$OUT/$PKG_NAME-$VERSION.manifest.yaml"
+sed -e "s|blob_sha256: \"0*\"|blob_sha256: \"$sha\"|" \
+    "$MAN_EMBED" > "$MAN"
+echo "manifest: $MAN"
