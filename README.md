@@ -120,6 +120,27 @@ B. **pandas ctypes guard (`patches/pandas-3.1.1-guard-ctypes-import.patch`).**
    patch when the feedstock's runtime floor ships `_ctypes` on POSIX
    (tools/build's probe then prints the removal notice).**
 
+C. **Linux-gnu known blocker: tamatebako/tebako#1096 (the ELF header
+   window).** libtfs-preload's dependency walk parses only the first 1 MiB
+   of a loadable module (`crates/tfs/src/exec_closure.rs`,
+   `HEADER_WINDOW = 1<<20`). numpy 2.5.5's manylinux
+   `_multiarray_umath…so` (10,609,009 B) carries its PT_DYNAMIC at offset
+   ~9.9 MB, so `parse_elf` bails, the RUNPATH `$ORIGIN/../numpy.libs`
+   sibling never materializes, and every numpy import on x86_64-linux-gnu
+   dies `libscipy_openblas64_-….so: cannot open shared object file`
+   (CI run 45004111997). macOS is unaffected (the Mach-O headers sit
+   inside the window — arm 1 passes there); windows does not ride PyPI
+   wheels at all. The linux leg therefore runs its boot-smoke +
+   conformance through `tools/linux_gate`, a TRI-STATE wrapper that never
+   fakes green: full pass → green (the full gates apply automatically the
+   moment the blocker clears); the exact #1096 signature
+   (`libscipy_openblas64` + `cannot open shared object file`) → green by
+   NAMED EXCEPTION with a loud `::warning` citing the issue; any other
+   failure → red. **Owner: tamatebako/tebako (#1096 — widen or stream
+   the dep-walk's header window). Removal: the consumption chain (tebako
+   release → link unit → factory rebuild → the runtime pin bump here);
+   the gate's PASS branch then asserts itself and the wrapper is deleted.**
+
 ## Operational note: the exec-cache dlcache and rebuilt images
 
 On macOS the driver's persistent dlcache keys a mount's materialized
@@ -148,7 +169,7 @@ bytes until the cache was cleared).
   CLI, the bundled sample table, the three conformance arms).
 - `tools/` — pins.rb (recipe → CI env/matrix/payload-args) /
   stage_runtime / gen_closure / stage_msys2 / build / boot_smoke /
-  conformance / pypi_offers.py.
+  conformance / linux_gate (deviation C) / pypi_offers.py.
 - `.github/workflows/build-payload.yml` — plan (matrix from the recipe) →
   the three per-triplet legs (POSIX pipstage host-native; windows via
   msys2) → boot-smoke + checks + the conformance arms. No publish job in
