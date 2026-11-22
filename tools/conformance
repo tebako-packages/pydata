@@ -17,13 +17,16 @@
 #
 # Env: RUNTIME (the runtime exe), RUNTIME_IMAGE (the env .tfs) —
 # tools/build writes both into out/<triplet>/runtime.env. ARM_TIMEOUT
-# (seconds, default 300) bounds every arm.
+# (seconds, default 300) bounds every arm. ARMS (default "1 2 3") selects
+# the arms to run — the CI legs gate a known-blocked arm separately
+# (tools/blocker_gate), so the healthy arms stay HARD gates here.
 set -euo pipefail
 
 IMG="${1:?usage: tools/conformance <image.tfs>}"
 RUNTIME="${RUNTIME:?set RUNTIME to the tebako runtime exe (tools/build writes out/<triplet>/runtime.env)}"
 RUNTIME_IMAGE="${RUNTIME_IMAGE:?set RUNTIME_IMAGE to the runtime env .tfs}"
 ARM_TIMEOUT="${ARM_TIMEOUT:-300}"
+ARMS="${ARMS:-1 2 3}"
 
 FEEDSTOCK="$(cd "$(dirname "$0")/.." && pwd)"
 if command -v cygpath >/dev/null 2>&1; then
@@ -76,8 +79,13 @@ run_arm() {
   }
 }
 
-run_arm "arm1 mount layout" "$ARM_DIR/arm1_mount_layout.py"
-run_arm "arm2 __file__ data" "$ARM_DIR/arm2_file_data.py"
-run_arm "arm3 mp spawn" "$ARM_DIR/arm3_mp_spawn.py"
+for arm in $ARMS; do
+  case "$arm" in
+    1) run_arm "arm1 mount layout" "$ARM_DIR/arm1_mount_layout.py" ;;
+    2) run_arm "arm2 __file__ data" "$ARM_DIR/arm2_file_data.py" ;;
+    3) run_arm "arm3 mp spawn" "$ARM_DIR/arm3_mp_spawn.py" ;;
+    *) echo "conformance: unknown arm '$arm' (ARMS='$ARMS')" >&2; exit 2 ;;
+  esac
+done
 
-echo "CONFORMANCE-OK (3 arms)"
+echo "CONFORMANCE-OK (arms: $(echo "$ARMS" | tr '\n' ' '))"

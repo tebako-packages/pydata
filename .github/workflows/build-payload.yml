@@ -187,7 +187,7 @@ jobs:
         # tools/boot_smoke = tfs in-image assertions + extract round-trip
         # + `tebako check` (the spec-26 press-time gate; FAIL is the
         # engine's named exit 79) + the manual spec-17 dispatch smoke.
-        # x86_64-linux-gnu rides tools/linux_gate (README deviation C,
+        # x86_64-linux-gnu rides tools/blocker_gate (README deviation C,
         # tamatebako/tebako#1096): the known openblas blocker is a NAMED
         # exception; every other failure stays red, and the moment the
         # blocker clears the full gates run automatically.
@@ -199,7 +199,7 @@ jobs:
           set +a
           export TFS="$GITHUB_WORKSPACE/.tools/tfs" TEBAKO="$GITHUB_WORKSPACE/.tools/tebako"
           if [ "$TRIPLET" = "x86_64-linux-gnu" ]; then
-            bash tools/linux_gate boot-smoke bash tools/boot_smoke "$PAYLOAD_IMG"
+            bash tools/blocker_gate tebako-1096 boot-smoke bash tools/boot_smoke "$PAYLOAD_IMG"
           else
             bash tools/boot_smoke "$PAYLOAD_IMG"
           fi
@@ -207,18 +207,29 @@ jobs:
       - name: Conformance arms (mount layout, __file__ data, mp spawn)
         # The second flagship's three named cases (TODO.sota2/05 arc 2),
         # each under a hard deadline — a hang fails the arm by name.
-        # x86_64-linux-gnu rides tools/linux_gate (README deviation C).
+        # x86_64-linux-gnu: the whole suite rides the tebako#1096 gate
+        # (README deviation C — numpy cannot even import there).
+        # x86_64-windows-ucrt: arms 1+2 are HARD gates; arm 3 rides the
+        # tebako-runtime-python#105 gate (README deviation D — the
+        # published windows runtime lacks sem_unlink).
         run: |
           set -euo pipefail
           set -a
           # shellcheck disable=SC1090
           . "out/$TRIPLET/runtime.env"
           set +a
-          if [ "$TRIPLET" = "x86_64-linux-gnu" ]; then
-            bash tools/linux_gate conformance bash tools/conformance "$PAYLOAD_IMG"
-          else
-            bash tools/conformance "$PAYLOAD_IMG"
-          fi
+          case "$TRIPLET" in
+            x86_64-linux-gnu)
+              bash tools/blocker_gate tebako-1096 conformance bash tools/conformance "$PAYLOAD_IMG"
+              ;;
+            x86_64-windows-ucrt)
+              ARMS="1 2" bash tools/conformance "$PAYLOAD_IMG"
+              ARMS=3 bash tools/blocker_gate runtime-python-105 arm3-mp-spawn bash tools/conformance "$PAYLOAD_IMG"
+              ;;
+            *)
+              bash tools/conformance "$PAYLOAD_IMG"
+              ;;
+          esac
 
       - name: Stage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
