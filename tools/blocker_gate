@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# tools/blocker_gate <blocker-id> <label> <command...> — the KNOWN-BLOCKER
+# gate for upstream gaps this feedstock cannot fix. NOT a green-faker: a
+# tri-state verdict per invocation.
+#
+#   exit 0            -> PASS: the wrapped gate ran green (the blocker is
+#                        CLEARED — the full gates apply automatically from
+#                        then on; this wrapper dissolves itself)
+#   exit !=0 + the log carries BOTH signature substrings
+#                     -> KNOWN-BLOCKER: loud ::warning citing the owning
+#                        issue; the leg goes green by NAMED EXCEPTION,
+#                        never silently
+#   exit !=0 otherwise-> RED: a real regression, surfaced with the status
+#
+# The blocker registry (each entry: the two signature substrings, the
+# owning issue, the mechanism, the removal condition):
+declare -A SIG_A SIG_B REF WHY REMOVAL
+
+SIG_A[tebako-1096]='libscipy_openblas64'
+SIG_B[tebako-1096]='cannot open shared object file'
+REF[tebako-1096]='tamatebako/tebako#1096'
+WHY[tebako-1096]="libtfs-preload's ELF dep-walk reads only the first 1 MiB of a loadable module (crates/tfs/src/exec_closure.rs, HEADER_WINDOW); numpy 2.5.5's manylinux _multiarray_umath .so (10,609,009 B) carries PT_DYNAMIC at ~9.9 MB, so parse_elf bails and numpy.libs/libscipy_openblas64 never materializes — every numpy import on x86_64-linux-gnu dies"
+REMOVAL[tebako-1096]='a tebako release carrying the fix -> link unit -> factory rebuild -> runtime pin bump in this feedstock'
+
+SIG_A[runtime-python-105]="cannot import name 'sem_unlink'"
+SIG_B[runtime-python-105]='_multiprocessing'
+REF[runtime-python-105]='tamatebako/tebako-runtime-python#105'
+WHY[runtime-python-105]="the factory's windows-ucrt64 build lacks the sem_unlink export upstream win32 always provides (the mingw/autoconf path drops it behind POSIX_SEMAPHORES_NOT_ENABLED; msys2's mingw-w64-python carries the fix as patch 0038); multiprocessing/synchronize.py imports sem_unlink UNCONDITIONALLY, so Lock/Queue/Pool all die at import on the windows runtime"
+REMOVAL[runtime-python-105]='a factory release carrying the sem_unlink fix -> the runtime pin bump in this feedstock'
+
+set -uo pipefail
+
+blocker="${1:?usage: blocker_gate <blocker-id> <label> <command...>}"
+label="${2:?usage: blocker_gate <blocker-id> <label> <command...>}"
+shift 2
+[ -n "${REF[$blocker]:-}" ] || { echo "blocker_gate: unknown blocker id '$blocker' (registry at the top of $0)" >&2; exit 2; }
+
+log="$(mktemp -t blocker_gate.XXXXXX)"
+trap 'rm -f "$log"' EXIT
+
+echo "== blocker_gate [$blocker / $label]: $*"
+"$@" 2>&1 | tee "$log"
+status=${PIPESTATUS[0]}
+
+if [ "$status" -eq 0 ]; then
+  echo "blocker_gate [$blocker / $label]: PASS — the wrapped gate ran green; the blocker is cleared and the full gates apply"
+  exit 0
+fi
+
+if grep -qF "${SIG_A[$blocker]}" "$log" && grep -qF "${SIG_B[$blocker]}" "$log"; then
+  echo "::warning::blocker_gate [$blocker / $label]: KNOWN BLOCKER ${REF[$blocker]} — ${WHY[$blocker]}. Leg green by NAMED EXCEPTION, not by pass. Removal: ${REMOVAL[$blocker]}. ANY OTHER FAILURE STAYS RED."
+  echo "blocker_gate [$blocker / $label]: KNOWN-BLOCKER (${REF[$blocker]}) — wrapped exit $status recorded, not hidden"
+  exit 0
+fi
+
+echo "::error::blocker_gate [$blocker / $label]: FAILED (exit $status) and the log does NOT match the ${REF[$blocker]} signature ('${SIG_A[$blocker]}' + '${SIG_B[$blocker]}') — a real regression, not the known blocker"
+exit "$status"
