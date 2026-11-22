@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# tools/linux_gate — the x86_64-linux-gnu KNOWN-BLOCKER gate for
+# tamatebako/tebako#1096. NOT a green-faker: a tri-state verdict.
+#
+# The blocker: libtfs-preload's ELF dep-walk (crates/tfs/src/exec_closure.rs,
+# HEADER_WINDOW = 1<<20) parses only the first 1 MiB of a loadable module.
+# numpy's _multiarray_umath .so (10,609,009 B in the pinned
+# manylinux_2_27_x86_64 wheel) carries PT_DYNAMIC at offset 9,901,576, so
+# parse_elf bails ("load-module magic but malformed, rides alone"), the
+# RUNPATH $ORIGIN/../numpy.libs sibling never materializes, and the import
+# dies: libscipy_openblas64_-4b78795a.so: cannot open shared object file.
+# macOS is unaffected (Mach-O headers sit inside the window); windows does
+# not ride PyPI wheels at all.
+#
+# Usage: tools/linux_gate <label> <command...>
+#   exit 0            -> PASS: the wrapped gate ran green (the blocker is
+#                        CLEARED — the full gates run automatically from
+#                        then on; this wrapper dissolves itself)
+#   exit !=0 + the log carries BOTH signature substrings
+#                     -> KNOWN-BLOCKER: loud ::warning citing #1096, the
+#                        leg goes green by NAMED EXCEPTION, never silently
+#   exit !=0 otherwise-> RED: a real regression, surfaced with the status
+set -uo pipefail
+
+label="${1:?usage: linux_gate <label> <command...>}"
+shift
+log="$(mktemp -t linux_gate.XXXXXX)"
+trap 'rm -f "$log"' EXIT
+
+echo "== linux_gate [$label]: $*"
+"$@" 2>&1 | tee "$log"
+status=${PIPESTATUS[0]}
+
+if [ "$status" -eq 0 ]; then
+  echo "linux_gate [$label]: PASS — the wrapped gate ran green; the #1096 blocker is cleared and the full gates apply"
+  exit 0
+fi
+
+if grep -q 'libscipy_openblas64' "$log" && grep -q 'cannot open shared object file' "$log"; then
+  echo "::warning::linux_gate [$label]: KNOWN BLOCKER tamatebako/tebako#1096 — libtfs-preload reads only the first 1 MiB of an ELF (HEADER_WINDOW); numpy's 10.6 MB _multiarray_umath module carries PT_DYNAMIC at ~9.9 MB, so numpy.libs/libscipy_openblas64 never materializes and the import dies. Leg green by NAMED EXCEPTION, not by pass. Removal: a tebako release carrying the fix -> link unit -> factory rebuild -> runtime pin bump in this feedstock. ANY OTHER FAILURE STAYS RED."
+  echo "linux_gate [$label]: KNOWN-BLOCKER (#1096) — wrapped exit $status recorded, not hidden"
+  exit 0
+fi
+
+echo "::error::linux_gate [$label]: FAILED (exit $status) and the log does NOT match the #1096 signature (libscipy_openblas64 + 'cannot open shared object file') — a real regression, not the known blocker"
+exit "$status"

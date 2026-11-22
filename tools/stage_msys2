@@ -50,7 +50,16 @@ die() { echo "stage_msys2: $*" >&2; exit 1; }
 [ -d /ucrt64 ] || die "no /ucrt64 tree — run under the UCRT64 msys2 shell (shell: msys2 {0})"
 
 step "assert the msys2 ucrt64 python line ($MSYS_PY) matches the runtime's ABI line"
-[ -d "$SITE_SRC" ] || die "no msys2 python$MSYS_PY site-packages at $SITE_SRC — msys2's python line drifted from the recipe (build.windows_msys.python); a cp313 tree cannot serve the cp314 runtime"
+# Check the REPO METADATA before installing anything: site-packages does
+# not exist until pacman installs the interpreter, so a filesystem assert
+# here would fire on every clean runner (run 45004111997's windows leg).
+# The available python package's version must carry the recipe's line
+# (build.windows_msys.python) as its major.minor.
+py_ver="$(pacman -Si mingw-w64-ucrt-x86_64-python | awk -F': *' '/^Version/ {print $2; exit}')"
+case "$py_ver" in
+  "$MSYS_PY".*) echo "  msys2 python: $py_ver (line $MSYS_PY — matches)";;
+  *) die "msys2's python line drifted: the repo offers $py_ver, the recipe pins line $MSYS_PY (a cp313 tree cannot serve the cp314 runtime)";;
+esac
 
 members="${MSYS_MEMBERS:-$(recipe build windows_msys members | tr '\n' ' ')}"
 closure_members="${MSYS_CLOSURE_MEMBERS:-$(recipe build windows_msys closure_members | tr '\n' ' ')}"
@@ -60,6 +69,9 @@ packages="$(echo "$packages" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' '
 
 step "pacman -Sy --needed: $packages"
 pacman -Sy --needed --noconfirm $packages
+
+# Now the tree exists: the filesystem assert rides AFTER the install.
+[ -d "$SITE_SRC" ] || die "no msys2 python$MSYS_PY site-packages at $SITE_SRC after pacman install — the package layout drifted"
 
 step "stage site-packages members -> $OUT_SITE"
 rm -rf "$OUT_SITE"

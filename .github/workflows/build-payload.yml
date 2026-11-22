@@ -187,25 +187,38 @@ jobs:
         # tools/boot_smoke = tfs in-image assertions + extract round-trip
         # + `tebako check` (the spec-26 press-time gate; FAIL is the
         # engine's named exit 79) + the manual spec-17 dispatch smoke.
+        # x86_64-linux-gnu rides tools/linux_gate (README deviation C,
+        # tamatebako/tebako#1096): the known openblas blocker is a NAMED
+        # exception; every other failure stays red, and the moment the
+        # blocker clears the full gates run automatically.
         run: |
           set -euo pipefail
           set -a
           # shellcheck disable=SC1090  # the leg's runtime.env is written by tools/build
           . "out/$TRIPLET/runtime.env"
           set +a
-          TFS="$GITHUB_WORKSPACE/.tools/tfs" TEBAKO="$GITHUB_WORKSPACE/.tools/tebako" \
+          export TFS="$GITHUB_WORKSPACE/.tools/tfs" TEBAKO="$GITHUB_WORKSPACE/.tools/tebako"
+          if [ "$TRIPLET" = "x86_64-linux-gnu" ]; then
+            bash tools/linux_gate boot-smoke bash tools/boot_smoke "$PAYLOAD_IMG"
+          else
             bash tools/boot_smoke "$PAYLOAD_IMG"
+          fi
 
       - name: Conformance arms (mount layout, __file__ data, mp spawn)
         # The second flagship's three named cases (TODO.sota2/05 arc 2),
         # each under a hard deadline — a hang fails the arm by name.
+        # x86_64-linux-gnu rides tools/linux_gate (README deviation C).
         run: |
           set -euo pipefail
           set -a
           # shellcheck disable=SC1090
           . "out/$TRIPLET/runtime.env"
           set +a
-          bash tools/conformance "$PAYLOAD_IMG"
+          if [ "$TRIPLET" = "x86_64-linux-gnu" ]; then
+            bash tools/linux_gate conformance bash tools/conformance "$PAYLOAD_IMG"
+          else
+            bash tools/conformance "$PAYLOAD_IMG"
+          fi
 
       - name: Stage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

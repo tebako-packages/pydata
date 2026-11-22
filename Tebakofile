@@ -114,7 +114,7 @@ ci:
   # increment: the linux-gnu leg is host-native (this feedstock compiles
   # nothing — pipstage fetches wheels), macos + windows runner-native.
   hosts:
-    aarch64-macos: "macos-14"
+    aarch64-macos: "macos-15"
     x86_64-linux-gnu: "ubuntu-22.04"
     x86_64-windows-ucrt: "windows-latest"
   containers: {}
