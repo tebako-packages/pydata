@@ -124,17 +124,22 @@ if [ "$TRIPLET" = x86_64-windows-ucrt ]; then
   cp -r "$MSYS_SITE" "$PAYLOAD/lib/python/site-packages"
   # The mingw pyds' own dependency DLLs (openblas, the gfortran stack,
   # freetype, ...) ride the payload's bin/ — a PATH lead at dispatch
-  # (spec 22 §3.2), and the loader ALSO resolves a pyd's dependencies
-  # against the pyd's OWN directory first (the stronger guarantee), so
-  # the closure lands beside the pyds too (the xml2rfc lxml pattern).
+  # (spec 22 §3.2) — AND beside EVERY .pyd: cpython loads extension
+  # modules with LOAD_WITH_ALTERED_SEARCH_PATH, so a pyd's dependencies
+  # resolve against the pyd's OWN directory first (the stronger
+  # guarantee). lxml's pyds sit at the member top (the xml2rfc pattern
+  # sufficed there), but numpy 2.x keeps its compiled cores in
+  # numpy/_core/, numpy/linalg, numpy/fft, numpy/random and matplotlib
+  # keeps _backend_agg under matplotlib/backends/ — a member-top copy
+  # leaves those one level up and the import dies "DLL load failed … The
+  # specified module could not be found" (run 45005758678). limnifs is
+  # content-addressed: the duplicated bytes store once.
   if compgen -G "$MSYS_DLLS/"*.dll > /dev/null; then
     cp "$MSYS_DLLS/"*.dll "$PAYLOAD/bin/"
-    for member in numpy pandas matplotlib PIL kiwisolver contourpy; do
-      if [ -d "$PAYLOAD/lib/python/site-packages/$member" ]; then
-        cp "$MSYS_DLLS/"*.dll "$PAYLOAD/lib/python/site-packages/$member/" 2>/dev/null || true
-      fi
-    done
-    step "staged $(ls "$MSYS_DLLS/"*.dll | wc -l | tr -d ' ') mingw DLLs into the payload bin and beside the pyds"
+    while IFS= read -r pyd_dir; do
+      cp "$MSYS_DLLS/"*.dll "$pyd_dir/"
+    done < <(find "$PAYLOAD/lib/python/site-packages" -type f -name '*.pyd' -exec dirname {} \; | sort -u)
+    step "staged $(ls "$MSYS_DLLS/"*.dll | wc -l | tr -d ' ') mingw DLLs into the payload bin and beside every pyd"
   else
     die "the msys2 DLL closure is empty — stage_msys2's objdump walk found nothing (the stack is compiled; support DLLs must ride the payload)"
   fi
