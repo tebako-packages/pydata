@@ -42,7 +42,7 @@ FEEDSTOCK="$(cd "$(dirname "$0")/.." && pwd)"
 # POSIX path spellings — FEEDSTOCK goes windows-form where cygpath exists
 # (inert on POSIX; the stage_runtime pattern).
 if command -v cygpath >/dev/null 2>&1; then FEEDSTOCK="$(cygpath -m "$FEEDSTOCK")"; fi
-recipe() { ruby -ryaml -e "puts(YAML.load_file('$FEEDSTOCK/Tebakofile').dig(*ARGV) || '')" "$@"; }
+recipe() { ruby -ryaml -e "puts(YAML.load_file('$FEEDSTOCK/Tebakofile').dig(*ARGV) || '')" "$@" | tr -d '\r'; }
 
 PKG_NAME="$(recipe name)"
 VERSION="${VERSION:-$(recipe upstream version)}"
