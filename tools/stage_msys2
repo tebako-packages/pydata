@@ -35,7 +35,7 @@ FEEDSTOCK="$(cd "$(dirname "$0")/.." && pwd)"
 # The UCRT64 msys2 shell carries NO ruby — the recipe reads flow through
 # the environment (the workflow's pins export step, pins.rb --msys-env);
 # the recipe fallback keeps direct local runs working where ruby exists.
-recipe() { ruby -ryaml -e "puts(YAML.load_file('$FEEDSTOCK/Tebakofile').dig(*ARGV) || '')" "$@"; }
+recipe() { ruby -ryaml -e "puts(YAML.load_file('$FEEDSTOCK/Tebakofile').dig(*ARGV) || '')" "$@" | tr -d '\r'; }
 
 VERSION="${PKG_VERSION:-${VERSION:-$(recipe upstream version)}}"
 MSYS_PY="${MSYS_PY:-$(recipe build windows_msys python)}"

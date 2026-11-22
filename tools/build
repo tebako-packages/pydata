@@ -40,7 +40,7 @@ FEEDSTOCK="$(cd "$(dirname "$0")/.." && pwd)"
 # Git Bash's POSIX path spellings — FEEDSTOCK goes windows-form where
 # cygpath exists (inert on POSIX; the stage_runtime pattern).
 if command -v cygpath >/dev/null 2>&1; then FEEDSTOCK="$(cygpath -m "$FEEDSTOCK")"; fi
-recipe() { ruby -ryaml -e "puts(YAML.load_file('$FEEDSTOCK/Tebakofile').dig(*ARGV) || '')" "$@"; }
+recipe() { ruby -ryaml -e "puts(YAML.load_file('$FEEDSTOCK/Tebakofile').dig(*ARGV) || '')" "$@" | tr -d '\r'; }
 
 PKG_NAME="$(recipe name)"
 VERSION="${VERSION:-$(recipe upstream version)}"
@@ -235,7 +235,11 @@ ruby -ryaml -e 'YAML.load_file(ARGV[0]).fetch("provides").fetch("entrypoints").e
   cmdname=${cmdname%$'\r'} cmdpath=${cmdpath%$'\r'}
   [ -f "$PAYLOAD$cmdpath" ] || die "declared entrypoint $cmdpath not staged"
 done
-for m in $(recipe build native_members); do
+# The CI pins export NATIVE_MEMBERS (pins.rb --env); the recipe read is
+# the local fallback. recipe() strips CR — the runner's native windows
+# ruby writes CRLF and an unstripped "numpy\r" fails this assert (run
+# 45005144835's windows leg).
+for m in ${NATIVE_MEMBERS:-$(recipe build native_members)}; do
   [ -d "$PAYLOAD/lib/python/site-packages/$m" ] || die "native member $m missing from the staged site-packages"
 done
 echo "declared commands staged and verified; native members present"
