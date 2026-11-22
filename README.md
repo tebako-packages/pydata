@@ -8,10 +8,13 @@ ruby case; this payload proves it generalizes across languages — native
 wheels with BLAS linkage, data files, and the install pain python is
 famous for, answered hermetically.
 
-**Status: build + gate.** The three desktop-triplet legs stage the
-closure, press the image, and run the boot smoke + the three named
-conformance arms. Publishing (the release workflow + registry rows + the
-public comparison page) is the next increment — named, not shipped.
+**Status: build + gate + publish pipeline (owner-dispatched).** The three
+desktop-triplet legs stage the closure, press the image, and run the boot
+smoke + the three named conformance arms; the wrong-line-refusal job
+proves the named exit-69 ABI refusal on every run. The publish job (tag
+dispatch with `publish=true`, the owner's explicit act — never automatic)
+uploads the signed assets + writes the registry rows via bot PR. The first
+real publish awaits the owner's go.
 
 ## Design decisions
 
@@ -189,13 +192,17 @@ bytes until the cache was cleared).
   CLI, the bundled sample table, the three conformance arms).
 - `tools/` — pins.rb (recipe → CI env/matrix/payload-args) /
   stage_runtime / gen_closure / stage_msys2 / build / boot_smoke /
-  conformance / blocker_gate (deviations C + D) / pypi_offers.py.
+  conformance / blocker_gate (deviations C + D) / set_registry_default.rb
+  (the publish job's default move) / compare_install (the README table's
+  numbers) / pypi_offers.py.
 - `.github/workflows/build-payload.yml` — plan (matrix from the recipe) →
   the three per-triplet legs (POSIX pipstage host-native; windows via
-  msys2) → boot-smoke + checks + the conformance arms. No publish job in
-  this increment.
-- `tpkg-registry.yaml` — this package's registry; filled at first
-  publish.
+  msys2) → boot-smoke + checks + the conformance arms → the wrong-line
+  refusal acceptance → the publish job (tag dispatch with
+  `publish=true` only: signed release assets + the registry bot PR).
+- `tpkg-registry.yaml` — this package's registry; upserted by the publish
+  job (never hand-edited — main is branch-protected, the registry lands
+  by bot PR + auto-merge).
 
 ## Local rehearsal (one POSIX triplet, e.g. aarch64-macos)
 
@@ -206,17 +213,87 @@ TRIPLET=aarch64-macos tools/build        # pipstage -> out/aarch64-macos/pydata-
 set -a; . out/aarch64-macos/runtime.env; set +a
 tools/boot_smoke "$PAYLOAD_IMG"          # image assertions + tebako check + dispatch smoke
 tools/conformance "$PAYLOAD_IMG"         # the three arms, under deadlines
+tools/compare_install                    # the comparison table below (needs network)
 ```
+
+## Install UX, measured (tebako vs pip+venv vs conda)
+
+One host, one script — `tools/compare_install` prints the paste-ready
+table; re-run it to reproduce every number. Measured 2026-11-22 on an
+arm64 Apple M1 Max (macOS 14.1.1) with homebrew python 3.14.6, tebako
+2.8.60, micromamba 2.10.0. The tebako row is THIS feedstock's 0.1.0
+aarch64-macos image on the factory's v0.3.5 runtime pair; the pip/conda
+rows install the same member pins (numpy 2.5.5 / pandas 3.1.1 /
+matplotlib 3.11.2).
+
+| metric | tebako (this payload) | pip + venv | conda (conda-forge) |
+|---|---|---|---|
+| install wall time | 0.11 s (store copy; + 175.2 MB download — 81.6 MB payload per package, 93.6 MB runtime pair once per machine) | 12.54 s | 15.52 s |
+| bytes on disk after install | 175.2 MB (payload 81.6 MB + runtime pair 93.6 MB, the runtime shared) | 205.3 MB | 427.7 MB |
+| first command (cold) | 29.61 s | 10.18 s | 15.77 s |
+| same command (warm, median of 5) | 4.17 s | 0.36 s | 0.39 s |
+
+How to read it, honestly:
+
+- **The install is the win.** One file, atomic, content-addressed, no
+  solver, no environment to manage, no compiler — and the runtime pair
+  (93.6 MB of the tebako bytes) lands once per machine and is SHARED by
+  every python payload on the same ABI line, so the second tebako python
+  package installs in sub-second time and adds only its payload bytes.
+  pip re-resolves into every venv; conda pays its solver plus the
+  largest footprint of the three.
+- **The command latency is the honest cost.** The tebako probe is the
+  payload's real first command — `pydata demo` imports numpy + pandas +
+  matplotlib and renders the bundled CSV to a PNG (this CLI imports the
+  whole stack at startup by construction) — while the pip/conda probes
+  run a bare `import numpy, pandas, matplotlib`; the tebako rows
+  therefore do strictly MORE work and still show the tax. Cold start
+  pays the first-run materialization into the driver's exec cache; even
+  warm, the VFS import path (thousands of small reads through the
+  mounted image) costs ~4 s where a host filesystem costs ~0.4 s. That
+  tax buys hermetic, unmodifiable, byte-verified execution, and it
+  narrows as the driver's caches improve. For a data tool whose real
+  commands run seconds to minutes it is the right trade; for a
+  `python -c` hot loop, today, it is not.
+- **Methodology.** Install wall is the end-to-end install verb (pip/conda
+  network-bound on the rehearsal host's connection; tebako measured as
+  the store copy with the download bytes named beside it). Disk is `du`
+  of everything the install left — the pip row rides an already-present
+  homebrew python whose bytes are NOT counted, while conda and tebako
+  both carry their interpreter. Cold is the first command after install
+  with a scratch exec cache (page cache as-is — noted, not gamed); warm
+  is the median of five repeats. Sizes are MiB (1,048,576 B); times are
+  wall-clock seconds.
+
+## Publishing (the owner's explicit act)
+
+Never automatic (the ecosystem hard rule). The owner pushes a tag
+(`<version>[-<buildno>]`, e.g. `0.1.0-1`) and dispatches build-payload
+**on the tag** with `publish=true`. The publish job (gated on every leg +
+the wrong-line refusal green): downloads the legs' dist artifacts,
+verifies the toolchain pins, stages the release-channel runtime mirror
+for the CLI's clean-cache verify, signs per the recipe's `signing:` block
+(the org secret `TEBAKO_CI_SIGNING_KEY`; declared-signing + absent secret
+fails closed before any upload), uploads the per-triplet `.tfs` +
+`.sha256` sidecars + manifest mirror + `.asc` to the tag release, and
+upserts `tpkg-registry.yaml` — which lands on main by **bot PR +
+auto-merge** (direct pushes are GH006-refused). **Prerelease policy:** a
+tag whose version carries a non-numeric segment after the numeric prefix
+(`0.2.0rc1-1`) publishes its rows like any other but the release is
+flagged `--prerelease` and the registry `default:` never moves off the
+latest stable (`tools/set_registry_default.rb` runs on stable tags only).
 
 ## Next increment (named)
 
-- The publish workflow (owner-dispatched, tag-gated — the ecosystem hard
-  rule) + the `tpkg-registry.yaml` rows, signed per the recipe's
-  `signing:` block.
-- The wrong-line refusal gate (dispatching the published payload with
-  only a different python line available must earn the named exit-69
-  refusal — the xml2rfc acceptance pattern).
-- The public comparison page (TODO.sota2/05 arc 3): install UX measured
-  byte-for-byte against the incumbents (pip + venv, conda, docker).
+- **The first real publish** — the owner's go: tag + dispatch. Until
+  then the pipeline is proven on PR CI only.
+- **Consume the upstream fixes** (the blocker gates reassert
+  automatically): tebako#1097 (the ELF dep-walk fix, merged upstream) →
+  a tebako release → the link unit → a tebako-runtime-python rebuild
+  carrying tebako-runtime-python#106 (the sem_unlink patch) → a factory
+  release → the pin bumps here (`tools.release` + `build.runtime`) —
+  deviations C and D close on their PASS branches.
+- The public comparison page on tebako.org (a separate repo — the
+  measured table below is the content source).
 - Remaining triplets (linux-musl ×2, aarch64-linux-gnu, x86_64-macos) as
   the matrix widens; the windows arm64 leg when the factory serves it.

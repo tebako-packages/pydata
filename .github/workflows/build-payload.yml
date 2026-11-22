@@ -26,15 +26,27 @@ name: build-payload
 # layout, __file__ data, multiprocessing spawn — each under a hard
 # deadline, a hang fails by name).
 #
-# Publish: NOT in this increment (named next: the publish workflow +
-# registry rows + the public comparison page). Push/PR/dispatch runs
-# build + gate only.
+# Publish: the owner's explicit act — dispatch this workflow ON THE TAG
+# with publish=true (the ecosystem hard rule: push/PR/tag runs build +
+# gate only, they never publish). Tag grammar: <version>[-<buildno>]
+# (e.g. 0.1.0-1); a version carrying a non-numeric segment after the
+# numeric prefix is a PRERELEASE shape (0.2.0rc1-1) — its rows publish
+# like any other but the release is flagged --prerelease and the
+# registry `default:` stays on the latest stable (the publish job's
+# policy step). The wrong-line-refusal job is the resolver contract
+# gate (the named exit-69, never a segfault).
 
 on:
   push:
     branches: [main]
+    tags: ["*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish this run''s payloads to the tag release + registry PR (owner-only act; requires running on a tag ref)'
+        type: boolean
+        default: false
 
 # One run per branch/PR-head at a time (push + pull_request would
 # otherwise double-run); a new run cancels the stale one.
@@ -43,7 +55,8 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 # Every run block is bash (set -euo pipefail). On windows-latest the
 # default shell is pwsh and every step would break — git-bash on the
@@ -126,13 +139,17 @@ jobs:
         # The committed closure/<version>-<triplet>.txt is the build input.
         # A leg regenerates in-leg when its lock is missing (the generator
         # is the staged runtime's own pip — never the runner's python);
-        # maintainers commit the locks before a release tag.
+        # maintainers commit the locks before a release tag. Tags NEVER
+        # regenerate (a tag's bytes must be the committed lock's bytes).
         if: matrix.triplet != 'x86_64-windows-ucrt'
         run: |
           set -euo pipefail
           lock="closure/$PKG_VERSION-$TRIPLET.txt"
           if [ -s "$lock" ]; then
             echo "committed closure present: $lock"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "::error::committed closure lock $lock is missing — tags never regenerate (run any branch build, download the leg's closure-lock artifact, commit it)"
+            exit 1
           else
             tools/gen_closure
             echo "LOCK_GENERATED=$lock" >> "$GITHUB_ENV"
@@ -236,3 +253,263 @@ jobs:
         with:
           name: dist-${{ matrix.triplet }}
           path: out/${{ matrix.triplet }}/
+
+  wrong-line-refusal:
+    name: wrong-line refusal (acceptance)
+    # The resolver contract gate (spec 05 §5's native-extension law): the
+    # payload is baked to the recipe's ABI line (~> 3.14.0); dispatching
+    # it with only a DIFFERENT python line available must refuse with the
+    # named exit-69 — never a silent pick, never a crash. THE ROW UNDER
+    # TEST IS THIS RUN'S BUILD, installed through the reference grammar's
+    # file:// class DIRECTLY (a deliberate deviation from the xml2rfc
+    # shape, which installs the PUBLISHED row from the repo registry:
+    # spec 04's per-triplet rows require tfs:<service>: release refs —
+    # file:// is legal only on `platforms: universal` rows — and pydata
+    # has no published row before the first tag; the direct shape also
+    # keeps exercising the run's own manifest forever after). The job
+    # stages ONLY the wrong python line into a file:// runtime mirror,
+    # installs the run's artifact sha256-anchored, and dispatches both
+    # the pinned and the unpinned paths. Proven locally 2026-11-22
+    # (macOS 14 arm64, tebako 2.8.60) × python 3.12.14 as the wrong line:
+    # both paths refuse rc 69.
+    needs: [plan, build]
+    runs-on: macos-15
+    env:
+      TEBAKO_HOME: ${{ github.workspace }}/.tebako-wrongline
+      TEBAKO: ${{ github.workspace }}/.tools/tebako
+      # Any published factory line != the recipe's staging line — the
+      # refusal does not depend on WHICH wrong line (the factory's v0.3.5
+      # release carries 3.11.16 / 3.12.14 / 3.13.15 / 3.14.7). Bump when
+      # the recipe line bumps (it must simply differ).
+      WRONG_LINE: "3.12.14"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist-aarch64-macos
+          path: out/dist-aarch64-macos
+
+      - name: Read the toolchain pins (Tebakofile is the SSOT)
+        run: ruby tools/pins.rb macos-arm64 --env >> "$GITHUB_ENV"
+
+      - name: Guard — the wrong line must differ from the recipe line, and the artifact must exist
+        run: |
+          set -euo pipefail
+          [ "$WRONG_LINE" != "$RUNTIME_PYTHON" ] || { echo "::error::WRONG_LINE equals the recipe line ($RUNTIME_PYTHON) — pick another"; exit 1; }
+          IMG="$PWD/out/dist-aarch64-macos/$PKG_NAME-$PKG_VERSION-macos-arm64.tfs"
+          [ -f "$IMG" ] || { echo "::error::no dist artifact at $IMG"; exit 1; }
+          echo "IMG=$IMG" >> "$GITHUB_ENV"
+
+      - name: Fetch the toolchain (tebako + tebako-shim, pinned, sha256-verified)
+        # Both binaries: install links shims at the dispatcher found beside
+        # the CLI (the 74-class refusal otherwise).
+        run: |
+          set -euo pipefail
+          mkdir -p .tools && cd .tools
+          base="https://github.com/tamatebako/tebako/releases/download/$TEBAKO_RELEASE"
+          curl -fsSLO --retry 5 --retry-all-errors --retry-delay 3 "$base/$TEBAKO_ASSET"
+          curl -fsSLO --retry 5 --retry-all-errors --retry-delay 3 "$base/$SHIM_ASSET"
+          curl -fsSLO --retry 5 --retry-all-errors --retry-delay 3 "$base/SHA256SUMS"
+          echo "$TEBAKO_SHA256  $TEBAKO_ASSET" > SHA256PINS
+          echo "$SHIM_SHA256  $SHIM_ASSET" >> SHA256PINS
+          shasum -a 256 -c SHA256PINS
+          for pair in "$TEBAKO_ASSET:$TEBAKO_SHA256" "$SHIM_ASSET:$SHIM_SHA256"; do
+            asset="${pair%%:*}"; want="${pair##*:}"
+            got=$(awk -v a="$asset" '$2 == a {print $1}' SHA256SUMS)
+            [ "$got" = "$want" ] || { echo "::error::pin mismatch for $asset: Tebakofile=$want release=${got:-ABSENT}"; exit 1; }
+          done
+          chmod 755 "$TEBAKO_ASSET" "$SHIM_ASSET"
+          mv "$TEBAKO_ASSET" tebako
+          mv "$SHIM_ASSET" tebako-shim
+
+      - name: Stage ONLY the wrong python line into the runtime mirror
+        env:
+          GH_TOKEN: ${{ secrets.TEBAKO_CI_PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: HOST_IDS=macos-arm64 PY_V="$WRONG_LINE" MIRROR=out/wrong-line-mirror tools/stage_runtime
+
+      - name: Install the payload (file:// reference, sha256-anchored)
+        # No registry: the install names the artifact directly through the
+        # reference grammar's file:// class with its content sha256 as the
+        # pin. The store key is then the CONTENT ADDRESS, not the recipe
+        # version — the dispatch probes below env-pin TEBAKO_PYDATA_VERSION
+        # to that address (an unpinned dispatch dies at VERSION resolution:
+        # a 69, but not the RUNTIME refusal under test).
+        run: |
+          set -euo pipefail
+          # the fresh home does not exist yet on this path — create it
+          # first (the xml2rfc publish job's proven-red lesson)
+          mkdir -p "$TEBAKO_HOME"
+          printf 'runtimes:\n  python:\n    version: "%s"\n    tebako: "%s"\n' "$WRONG_LINE" "$RUNTIME_TEBAKO" > "$TEBAKO_HOME/config.yaml"
+          sha="$(shasum -a 256 "$IMG" | awk '{print $1}')"
+          TEBAKO_RUNTIME_MIRROR="file://$PWD/out/wrong-line-mirror" "$TEBAKO" install "file://$IMG?sha256=$sha"
+          test -x "$TEBAKO_HOME/shims/$PKG_NAME"
+          installed="$(basename "$(find "$TEBAKO_HOME/payloads" -name '*.tfs' | head -1)" .tfs)"
+          echo "INSTALLED=$installed" >> "$GITHUB_ENV"
+
+      - name: Assert the named refusal — pinned wrong line
+        # config.yaml pins runtimes.python to the WRONG line; dispatch must
+        # refuse the payload's `~> 3.14.0` ABI edge by name (local proof:
+        # "runtime preference python@3.12.14 does not satisfy \"~> 3.14.0\"").
+        run: |
+          set -euo pipefail
+          set +e
+          out=$(TEBAKO_PYDATA_VERSION="$INSTALLED" TEBAKO_RUNTIME_MIRROR="file://$PWD/out/wrong-line-mirror" "$TEBAKO_HOME/shims/$PKG_NAME" --version 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          [ "$rc" -eq 69 ] || { echo "::error::expected exit 69, got $rc"; exit 1; }
+          [ "$rc" -lt 128 ] || { echo "::error::signal death ($rc), never a named error"; exit 1; }
+          echo "$out" | grep -q "does not satisfy" || { echo "::error::the refusal must name the constraint mismatch: $out"; exit 1; }
+          ! echo "$out" | grep -qi "panicked" || { echo "::error::a rust panic is never the refusal"; exit 1; }
+
+      - name: Assert the named refusal — unpinned download path
+        # The same env-pinned payload with an EMPTIED config: no runtime
+        # preference at all, so the resolver walks the download path, the
+        # mirror offers only the wrong line, and the refusal is the named
+        # no-compatible-runtime 69 (still never a crash).
+        run: |
+          set -euo pipefail
+          printf '' > "$TEBAKO_HOME/config.yaml"
+          set +e
+          out=$(TEBAKO_PYDATA_VERSION="$INSTALLED" TEBAKO_RUNTIME_MIRROR="file://$PWD/out/wrong-line-mirror" "$TEBAKO_HOME/shims/$PKG_NAME" --version 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          [ "$rc" -eq 69 ] || { echo "::error::expected exit 69, got $rc"; exit 1; }
+          echo "$out" | grep -qiE "no compatible runtime|satisf" || { echo "::error::the refusal must name the resolution failure: $out"; exit 1; }
+          ! echo "$out" | grep -qi "panicked" || { echo "::error::a rust panic is never the refusal"; exit 1; }
+
+  release:
+    name: publish
+    needs: [plan, build, wrong-line-refusal]
+    runs-on: macos-15
+    # The owner's explicit act ONLY (the ecosystem hard rule): a dispatch
+    # with publish=true on a tag ref. Push/tag/PR runs never publish.
+    if: ${{ always() && !cancelled() && inputs.publish && needs.build.result == 'success' && needs.wrong-line-refusal.result == 'success' && startsWith(github.ref, 'refs/tags/') }}
+    env:
+      TEBAKO_CLI: ${{ github.workspace }}/.packager/tebako
+      TEBAKO_HOME: ${{ github.workspace }}/.tebako
+      TEBAKO_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          path: out
+          merge-multiple: false
+      - name: Restore layout
+        # each dist-<triplet> artifact carries the leg's out/<triplet>/
+        # contents; put them back at out/<triplet>/ for the publish below
+        run: |
+          set -e
+          for d in out/dist-*/; do
+            p="${d#out/dist-}"; p="${p%/}"
+            mkdir -p "out/$p"
+            mv "$d"* "out/$p/"
+            rmdir "$d"
+          done
+      - name: Read the toolchain pins (Tebakofile is the SSOT)
+        run: ruby tools/pins.rb macos-arm64 --env >> "$GITHUB_ENV"
+      - name: Fetch the publisher (pinned by Tebakofile, sha256-verified)
+        run: |
+          set -euo pipefail
+          mkdir -p .packager
+          curl -sL --fail --retry 5 --retry-all-errors --retry-delay 3 -o .packager/tebako \
+            "https://github.com/tamatebako/tebako/releases/download/$TEBAKO_RELEASE/$TEBAKO_ASSET"
+          curl -sL --fail --retry 5 --retry-all-errors --retry-delay 3 -o .packager/tebako-shim \
+            "https://github.com/tamatebako/tebako/releases/download/$TEBAKO_RELEASE/$SHIM_ASSET"
+          echo "$TEBAKO_SHA256  .packager/tebako" | shasum -a 256 -c -
+          echo "$SHIM_SHA256  .packager/tebako-shim" | shasum -a 256 -c -
+          chmod +x .packager/tebako .packager/tebako-shim
+          .packager/tebako --help > /dev/null
+      - name: Stage the runtime mirror for the publish verify
+        # tebako publish's clean-cache verify installs the payload and
+        # resolves its python runtime edge; the verify rides the same
+        # release-channel mirror + config pin as the legs. The fresh
+        # publisher home does not exist on this path (no tebako invocation
+        # precedes the append), so create it first.
+        env:
+          GH_TOKEN: ${{ secrets.TEBAKO_CI_PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          HOST_IDS=macos-arm64 tools/stage_runtime
+          mkdir -p "$TEBAKO_HOME"
+          printf 'runtimes:\n  python:\n    version: "%s"\n    tebako: "%s"\n' \
+            "$RUNTIME_PYTHON" "$RUNTIME_TEBAKO" >> "$TEBAKO_HOME/config.yaml"
+      - name: Publish payloads + registry
+        # Signing (Tebakofile's signing: block; spec 09 §9): SIGNING_KEYID
+        # flows from the pins step's GITHUB_ENV export; the CI signing
+        # subkey arrives as org secret TEBAKO_CI_SIGNING_KEY and is staged
+        # into the publisher home's keys/ below. Declared-signing + absent
+        # secret fails the publish (fail-closed before any upload).
+        env:
+          TEBAKO_RUNTIME_MIRROR: file://${{ github.workspace }}/out/runtime-mirror
+          TEBAKO_SIGNING_KEY: ${{ secrets.TEBAKO_CI_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          SIGN_ARGS=()
+          if [ -n "${SIGNING_KEYID:-}" ]; then
+            : "${TEBAKO_SIGNING_KEY:?publish: recipe declares signing but TEBAKO_SIGNING_KEY is empty — a signing feedstock never publishes unsigned}"
+            mkdir -p "$TEBAKO_HOME/keys"
+            printf '%s\n' "$TEBAKO_SIGNING_KEY" > "$TEBAKO_HOME/keys/ci-signing.key"
+            chmod 600 "$TEBAKO_HOME/keys/ci-signing.key"
+            SIGN_ARGS=(--sign="$SIGNING_KEYID")
+          else
+            echo "::notice::recipe declares no signing — publishing unsigned (unsigned is first-class; the registry carries no signature pins)"
+          fi
+          # SIGN_ARGS carries --sign=<keyid> when the recipe signs; the
+          # ${arr[@]+...} guard keeps the empty (unsigned) expansion
+          # legal under set -u on bash 3.2 (macOS's /bin/bash).
+          # shellcheck disable=SC2046  # --payload-args MUST word-split into the per-triplet --payload pairs
+          "$TEBAKO_CLI" publish "${SIGN_ARGS[@]+"${SIGN_ARGS[@]}"}" --name "$PKG_NAME" \
+            --release "tfs:github:tebako-packages/pydata:${{ github.ref_name }}" \
+            $(ruby tools/pins.rb --payload-args) \
+            --registry-out "$PWD/tpkg-registry.yaml"
+      - name: Registry default policy (stable tracks the publish; prerelease never moves it)
+        # Tag grammar (the workflow header): <version>[-<buildno>]. A
+        # version carrying a non-numeric segment after the numeric prefix
+        # (0.2.0rc1) is a PRERELEASE shape — its rows publish like any
+        # other, but `default:` STAYS on the latest stable publish (stable
+        # users never resolve onto a pre by default) and the release
+        # object is flagged prerelease so livecheck-style consumers skip
+        # it (the metanorma feedstock's policy, single-line here).
+        env:
+          GH_TOKEN: ${{ secrets.TEBAKO_CI_PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag_base="${{ github.ref_name }}"; tag_base="${tag_base%-*}"
+          if [[ "$tag_base" =~ [^0-9.] ]]; then
+            echo "::notice::prerelease tag $tag_base — flagging the release --prerelease; registry default: untouched (tracks the latest stable publish)"
+            gh release edit "${{ github.ref_name }}" --prerelease
+          else
+            ruby tools/set_registry_default.rb "$PKG_NAME" "$PKG_VERSION"
+          fi
+      # main is branch-protected: the registry lands by bot PR +
+      # auto-merge, never by direct push (GH006-refused in this org — the
+      # metanorma/xml2rfc pattern). Idempotent across re-runs of the same
+      # tag.
+      - name: Publish the registry entry via pull request
+        env:
+          # The CI PAT authors the PR: a GITHUB_TOKEN-authored PR's checks
+          # sit on the approval queue until they expire red.
+          GH_TOKEN: ${{ secrets.TEBAKO_CI_PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "tebako-ci"
+          git config user.email "tebako@ribose.com"
+          git fetch origin main
+          if git diff --quiet origin/main -- tpkg-registry.yaml; then
+            echo "registry unchanged (or the entry already landed on main)"
+            exit 0
+          fi
+          branch="publish/${{ github.ref_name }}-registry"
+          git checkout -b "$branch"
+          git add tpkg-registry.yaml
+          git commit -m "publish ${{ github.ref_name }}: registry entry (all recipe platforms)"
+          git push origin "$branch"
+          if ! gh pr view "$branch" >/dev/null 2>&1; then
+            gh pr create --base main --head "$branch" \
+              --title "publish ${{ github.ref_name }}: registry entry" \
+              --body "Automated registry entry for ${{ github.ref_name }} (the build-payload publish job; main is protected, so the registry lands by PR)."
+          fi
+          gh pr merge --auto --squash "$branch" || gh pr merge --squash "$branch"

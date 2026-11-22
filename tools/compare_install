@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# tools/compare_install [scratch] — measure the install comparison table
+# (README "Install UX, measured") on the CURRENT host: tebako vs pip+venv
+# vs conda (micromamba). Every number the README table carries comes from
+# one run of this script — rerun it to reproduce.
+#
+#   tools/compare_install            # scratch under $TMPDIR
+#
+# Prereqs: the feedstock's own build outputs for this host
+# (tools/stage_runtime + TRIPLET=<triplet> tools/build — the README's
+# local rehearsal), a host python3.14 for the pip leg, and network for
+# the pip/conda downloads. The conda leg rides a fetched micromamba
+# static binary (recorded in the output).
+#
+# Metrics per leg:
+#   install wall  — seconds, end-to-end install verb (network-bound; the
+#                   download bytes differ per ecosystem and are recorded)
+#   disk bytes    — bytes on disk after install (du -sk, 1 KiB blocks)
+#   cold command  — first `import numpy, pandas, matplotlib` after
+#                   install (tebako: the first dispatch with a scratch
+#                   exec cache; both: page cache as-is — noted honestly)
+#   warm command  — median of 5 repeats of the same command
+set -euo pipefail
+
+FEEDSTOCK="$(cd "$(dirname "$0")/.." && pwd)"
+TRIPLET="${TRIPLET:-aarch64-macos}"
+WORK="${1:-$(mktemp -d -t pydata-compare)}"
+mkdir -p "$WORK"
+echo "scratch: $WORK"
+
+die() { echo "compare_install: $*" >&2; exit 1; }
+now_ms() { ruby -e 'puts (Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000).round'; }
+# time_ms <label> <cmd...> — run once, echo milliseconds
+time_ms() { local label="$1"; shift; local a b; a=$(now_ms); "$@" >/dev/null 2>&1 || die "$label FAILED"; b=$(now_ms); echo $((b - a)); }
+# median5_ms <cmd...> — 5 repeats, median
+median5_ms() { local v; v=$(for i in 1 2 3 4 5; do time_ms median-probe "$@"; done | sort -n | sed -n '3p'); echo "$v"; }
+
+IMG="$(ls "$FEEDSTOCK/out/$TRIPLET"/pydata-*-*.tfs 2>/dev/null | head -1)"
+[ -f "$IMG" ] || die "no built payload at out/$TRIPLET/ (run the README rehearsal first)"
+RT_DIR="$FEEDSTOCK/out/runtime-mirror/v0.3.5"
+RT_EXE="$(find "$RT_DIR" -maxdepth 1 -type f -name 'tebako-runtime-*-macos-arm64' -perm -u+x | head -1)"
+RT_IMG="$(ls "$RT_DIR"/tebako-runtime-*-macos-arm64.tfs 2>/dev/null | head -1)"
+[ -x "$RT_EXE" ] && [ -f "$RT_IMG" ] || die "no staged runtime at $RT_DIR (run tools/stage_runtime first)"
+command -v python3.14 >/dev/null || die "no python3.14 on PATH (the pip+venv leg's interpreter)"
+
+IMPORT='import numpy, pandas, matplotlib; print("import-ok", numpy.__version__, pandas.__version__, matplotlib.__version__)'
+
+echo; echo "== environment"
+echo "date:      $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "host:      $(uname -m) / $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo '?') / $(sw_vers -productName 2>/dev/null) $(sw_vers -productVersion 2>/dev/null)"
+echo "python:    $(python3.14 --version 2>&1) (homebrew)"
+/opt/homebrew/bin/tebako --version 2>/dev/null | sed 's/^/tebako:    /' || true
+
+# ------------------------------------------------------------- 1. tebako
+echo; echo "== tebako (this feedstock's image + the published runtime pair)"
+# "Install" = the bytes landing on the machine: the runtime pair is
+# downloaded once per machine and SHARED; the payload is per-package.
+# Measured as a store copy from the local mirror (network excluded — the
+# download sizes ARE the bytes below; the note is honest about it).
+TEB_HOME="$WORK/tebako-home"; mkdir -p "$TEB_HOME/payloads/pydata" "$TEB_HOME/runtimes/line"
+a=$(now_ms)
+cp "$IMG" "$TEB_HOME/payloads/pydata/payload.tfs"
+cp "$RT_EXE" "$TEB_HOME/runtimes/line/runtime-exe"
+cp "$RT_IMG" "$TEB_HOME/runtimes/line/runtime-env.tfs"
+b=$(now_ms); TEBAKO_INSTALL_MS=$((b - a))
+TEBAKO_BYTES=$(du -sk "$TEB_HOME" | awk '{print $1 * 1024}')
+TEBAKO_PAYLOAD_BYTES=$(stat -f %z "$IMG")
+TEBAKO_RUNTIME_BYTES=$(( $(stat -f %z "$RT_EXE") + $(stat -f %z "$RT_IMG") ))
+
+echo; echo "== pip + venv (python3.14)"
+PIP_VENV="$WORK/venv"
+a=$(now_ms)
+python3.14 -m venv "$PIP_VENV"
+PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 "$PIP_VENV/bin/pip" -q install \
+  numpy==2.5.5 pandas==3.1.1 matplotlib==3.11.2
+b=$(now_ms); PIP_INSTALL_MS=$((b - a))
+PIP_BYTES=$(du -sk "$PIP_VENV" | awk '{print $1 * 1024}')
+
+echo; echo "== conda (micromamba, conda-forge)"
+MB="$WORK/micromamba/bin/micromamba"
+if [ ! -x "$MB" ]; then
+  mkdir -p "$WORK/micromamba"
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 https://micro.mamba.pm/api/micromamba/osx-arm64/latest \
+    | tar -xj -C "$WORK/micromamba" bin/micromamba
+fi
+"$MB" --version | sed 's/^/micromamba: /'
+MB_ENV="$WORK/conda-env"
+a=$(now_ms)
+MAMBA_ROOT_PREFIX="$WORK/mamba-root" "$MB" create -y -q -p "$MB_ENV" -c conda-forge \
+  numpy=2.5.5 pandas=3.1.1 matplotlib=3.11.2 >/dev/null
+b=$(now_ms); CONDA_INSTALL_MS=$((b - a))
+CONDA_BYTES=$(du -sk "$MB_ENV" | awk '{print $1 * 1024}')
+
+# ------------------------------------------------- command latencies
+echo; echo "== command latency (import the trio)"
+# tebako: `pydata demo` imports numpy+pandas+matplotlib and renders the
+# bundled CSV to a PNG — the full stack's real first command. The probe
+# runs with cwd in the scratch (demo writes ./pydata-demo.png).
+teb_demo() { (cd "$WORK" && TEBAKO_RUNTIME_IMAGE="$RT_IMG" "$RT_EXE" "--tebako-image=$IMG:-:/" --tebako-entry=/bin/pydata demo); }
+rm -rf "${TMPDIR:-/tmp}"/tebako-exec-* 2>/dev/null || true
+TEBAKO_COLD_MS=$(time_ms tebako-cold teb_demo)
+TEBAKO_WARM_MS=$(median5_ms teb_demo)
+PIP_COLD_MS=$(time_ms pip-cold "$PIP_VENV/bin/python" -I -c "$IMPORT")
+PIP_WARM_MS=$(median5_ms "$PIP_VENV/bin/python" -I -c "$IMPORT")
+CONDA_COLD_MS=$(time_ms conda-cold "$MB_ENV/bin/python" -I -c "$IMPORT")
+CONDA_WARM_MS=$(median5_ms "$MB_ENV/bin/python" -I -c "$IMPORT")
+
+mb() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1048576 }'; }
+sec() { awk -v ms="$1" 'BEGIN { printf "%.2f", ms / 1000 }'; }
+
+echo; echo "== RESULTS (paste-ready)"
+cat <<EOF
+| metric | tebako (this payload) | pip + venv | conda (conda-forge) |
+|---|---|---|---|
+| install wall time | $(sec "$TEBAKO_INSTALL_MS") s (store copy; + $(mb "$TEBAKO_BYTES") MB download, the runtime pair once per machine) | $(sec "$PIP_INSTALL_MS") s | $(sec "$CONDA_INSTALL_MS") s |
+| bytes on disk after install | $(mb "$TEBAKO_BYTES") MB (payload $(mb "$TEBAKO_PAYLOAD_BYTES") MB + runtime pair $(mb "$TEBAKO_RUNTIME_BYTES") MB, the runtime shared) | $(mb "$PIP_BYTES") MB | $(mb "$CONDA_BYTES") MB |
+| first command (cold) | $(sec "$TEBAKO_COLD_MS") s | $(sec "$PIP_COLD_MS") s | $(sec "$CONDA_COLD_MS") s |
+| same command (warm, median of 5) | $(sec "$TEBAKO_WARM_MS") s | $(sec "$PIP_WARM_MS") s | $(sec "$CONDA_WARM_MS") s |
+EOF
+echo
+echo "scratch kept at: $WORK (rm -rf when done)"

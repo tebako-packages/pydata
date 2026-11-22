@@ -1,5 +1,7 @@
 schema_version: 1
-# The pydata package registry (spec 04 §2) — filled at first publish (the
-# next increment: the publish workflow + the registry rows land together,
-# signed per the Tebakofile signing: block).
+# The pydata package registry (spec 04 §2) — upserted ONLY by the
+# build-payload publish job (the owner's tag dispatch with publish=true,
+# signed per the Tebakofile signing: block). Never hand-edited: main is
+# branch-protected, the rows land by bot PR + auto-merge. Empty until the
+# first publish.
 payloads: []
