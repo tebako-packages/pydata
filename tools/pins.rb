@@ -92,6 +92,18 @@ if ARGV.include?("--matrix")
   exit 0
 end
 
+if ARGV.include?("--msys-env")
+  # The windows leg's msys2 staging pins as KEY=VALUE lines (the UCRT64
+  # shell carries no ruby — the workflow exports these into $GITHUB_ENV
+  # before the `shell: msys2 {0}` step).
+  msys = recipe.fetch("build").fetch("windows_msys")
+  puts "MSYS_PY=#{msys.fetch("python")}"
+  puts "MSYS_MEMBERS=#{msys.fetch("members").join(" ")}"
+  puts "MSYS_CLOSURE_MEMBERS=#{msys.fetch("closure_members").join(" ")}"
+  puts "NATIVE_MEMBERS=#{recipe.fetch("build").fetch("native_members").join(" ")}"
+  exit 0
+end
+
 if ARGV.include?("--payload-args")
   # The (next increment's) tebako publish --payload arguments, derived
   # from the recipe platforms (no triplet/artifact literals anywhere):
