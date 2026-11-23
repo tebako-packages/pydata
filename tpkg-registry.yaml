@@ -1,7 +1,37 @@
 schema_version: 1
-# The pydata package registry (spec 04 §2) — upserted ONLY by the
-# build-payload publish job (the owner's tag dispatch with publish=true,
-# signed per the Tebakofile signing: block). Never hand-edited: main is
-# branch-protected, the rows land by bot PR + auto-merge. Empty until the
-# first publish.
-payloads: []
+payloads:
+- name: pydata
+  kind: app
+  versions:
+  - version: '0.1.0'
+    platforms:
+      aarch64-macos:
+        artifact: pydata-0.1.0-macos-arm64.tfs
+        sha256: cc2d625ca98186136fb83249f81e7b45c4df039bc31d3790253aeb9a1ba162dd
+        blksum:
+          filename: pydata-0.1.0-macos-arm64.tfs.blksum.json
+          sha256: '62cfef7d7aad0829495525046982f95ea9c72722986dc00b54a20395e9746abc'
+      x86_64-linux-gnu:
+        artifact: pydata-0.1.0-linux-gnu-x86_64.tfs
+        sha256: '5269693158835621c6c5546a6e004ebb822d96ecfbe3c9ea983e8d8c8c53db59'
+        blksum:
+          filename: pydata-0.1.0-linux-gnu-x86_64.tfs.blksum.json
+          sha256: cc58c6bf29d695954b6606a421d41c3a7f25d0ad4864e6327c6b9507aa4ee6a4
+      x86_64-windows-ucrt:
+        artifact: pydata-0.1.0-windows-ucrt64.tfs
+        sha256: e129095ff81ddb12d0bed0bf54e853031f41b7ba1a21cd78ad9deacbf9d7db9a
+        blksum:
+          filename: pydata-0.1.0-windows-ucrt64.tfs.blksum.json
+          sha256: b7d828abe0feee1efa608ab6f4c08e24a759777fe17f5f3a4d121d8e8a5f0a45
+    release:
+      ref: tfs:github:tebako-packages/pydata:0.1.0-1
+    signature:
+      keyid: efc3c250f7862a48
+      asc: pydata-0.1.0-macos-arm64.tfs.asc
+    runtime_requirement:
+      engine: python
+      constraint: ~> 3.14.0
+      implementation: cpython
+    entrypoints:
+    - pydata
+  default: '0.1.0'
