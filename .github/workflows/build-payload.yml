@@ -25,6 +25,16 @@ name: build-payload
 # dispatch smoke) and tools/conformance (the three named arms: mount
 # layout, __file__ data, multiprocessing spawn — each under a hard
 # deadline, a hang fails by name).
+# ALL legs — the SBOM lane (pydata#4, replicating the metanorma#168
+# feedstock template): tools/build's tail generates the leg's CycloneDX
+# 1.6 SBOM from the hashed closure via the pinned CLI's sbom verb
+# (tebako#1120), and the publish job attaches it + signs it (.asc, the
+# CI signing subkey) + pins the registry sidecar + runs the report-only
+# osv-scanner smoke. A tools pin predating the verb skips LOUDLY —
+# activation is the pin roll, never a workflow edit. The windows-ucrt
+# leg's msys2 staging record carries no per-package hashes (pacman -Q
+# name+version), so that leg shape skips loudly too — its activation is
+# stage_msys2 recording the pacman cache digests.
 #
 # Publish: the owner's explicit act — dispatch this workflow ON THE TAG
 # with publish=true (the ecosystem hard rule: push/PR/tag runs build +
@@ -198,6 +208,7 @@ jobs:
       - name: Build the payload
         env:
           TFS_CLI: ${{ github.workspace }}/.tools/tfs
+          TEBAKO_CLI: ${{ github.workspace }}/.tools/tebako
         run: tools/build
 
       - name: Boot-smoke + payload checks
@@ -465,6 +476,111 @@ jobs:
             --release "tfs:github:tebako-packages/pydata:${{ github.ref_name }}" \
             $(ruby tools/pins.rb --payload-args) \
             --registry-out "$PWD/tpkg-registry.yaml"
+      # The SBOM publish (pydata#4 — replicating the metanorma#168
+      # feedstock template; tebako#1124's standing rules): each POSIX leg
+      # generated its CycloneDX 1.6 SBOM from the hashed wheel closure
+      # via the pinned CLI's sbom verb (tools/build — complete mode:
+      # every component carries purl + sha256) into its dist artifact.
+      # The publish ships it beside the payload with the SAME treatment
+      # as every other signed name: a detached .asc from the CI signing
+      # subkey (the same TEBAKO_CI_SIGNING_KEY material
+      # `tebako publish --sign` consumes; gpg is the detached-sign
+      # instrument for files the CLI does not itself sign). Skip-if-
+      # current like the CLI's own uploads — never a blanket --clobber.
+      # A tools pin predating the verb (and the windows-ucrt leg's
+      # hash-less msys2 record) stages no SBOMs and the step skips
+      # LOUDLY (the pin roll is the activation, never a workflow edit).
+      - name: Attach + sign the payload SBOMs (pydata#4)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TEBAKO_SIGNING_KEY: ${{ secrets.TEBAKO_CI_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sboms=(out/*/*.cdx.json)
+          if [ ${#sboms[@]} -eq 0 ]; then
+            echo "::notice::no .cdx.json in the staged dist artifacts — the legs' pinned tools predated the sbom verb (tebako#1120) or the leg shape carries no hashed closure (windows-ucrt); the SBOM publish activates with the tools pin roll (pydata#4)"
+            exit 0
+          fi
+          # Signing is DECLARED by the recipe (Tebakofile's signing:
+          # block, flowed by pins.rb): a signing feedstock never ships an
+          # unsigned SBOM silently — fail closed before any upload, the
+          # publish step's own rule.
+          [ -n "${SIGNING_KEYID:-}" ] || { echo "::error::sbom attach: the recipe declares no signing keyid — sign or drop the SBOMs, never publish them unsigned"; exit 1; }
+          : "${TEBAKO_SIGNING_KEY:?sbom attach: SIGNING_KEYID declared but TEBAKO_SIGNING_KEY is empty — a signing feedstock never publishes unsigned}"
+          command -v gpg >/dev/null 2>&1 || { echo "::error::sbom attach: gpg not on PATH — the .asc lane needs it"; exit 1; }
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
+          printf '%s\n' "$TEBAKO_SIGNING_KEY" | gpg --batch --import
+          for f in "${sboms[@]}"; do
+            gpg --batch --yes --pinentry-mode loopback \
+              --local-user "$SIGNING_KEYID" \
+              --detach-sign --armor --output "$f.asc" "$f"
+            for side in "$f" "$f.asc"; do
+              name="$(basename "$side")"
+              want="$(shasum -a 256 "$side" | cut -d' ' -f1)"
+              have="$(gh api "repos/tebako-packages/pydata/releases/tags/${{ github.ref_name }}" \
+                --jq ".assets[] | select(.name == \"$name\") | .digest" | sed 's/^sha256://')"
+              if [ "$have" = "$want" ]; then
+                echo "$name is already current on the release — skipping"
+              else
+                gh release upload "${{ github.ref_name }}" "$side" --clobber
+              fi
+            done
+          done
+
+      # The registry rows' SBOM sidecar (pydata#4): the additive
+      # `sbom: {artifact, sha256}` pin per platform entry, re-rendered
+      # from the release's own served digests AFTER the publish step's
+      # CLI upsert — the upsert round-trips its serde model and drops
+      # unknown keys, so the pins re-derive at every publish (the L3
+      # mirror-by-value rule). Pre-SBOM readers ignore the key (the
+      # registry evolution law — verified with the sbom-carrying CLI's
+      # `registry validate`).
+      - name: Pin the SBOM sidecars in the registry rows (pydata#4)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ruby tools/render_sbom_sidecars.rb "${{ github.repository }}"
+
+      # The acceptance proof, continuous (pydata#4; tebako#1124's
+      # universal acceptance): osv-scanner PARSES every published SBOM.
+      # Report-only by the lane's own contract. A parse failure warns
+      # loudly, never fails the publish. The tool is pinned by
+      # Tebakofile's sbom: block (the pins step above) and sha256-
+      # verified at fetch, cross-checked against the release's own
+      # osv-scanner_SHA256SUMS — the tebako tools fetch's discipline.
+      - name: SBOM smoke — osv-scanner parses (report-only)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sboms=(out/*/*.cdx.json)
+          if [ ${#sboms[@]} -eq 0 ]; then
+            echo "::notice::no SBOMs staged — the smoke no-ops (the tools pin predates the sbom verb; pydata#4)"
+            exit 0
+          fi
+          [ -n "${OSV_SCANNER_ASSET:-}" ] || { echo "::error::sbom smoke: pins.rb emitted no OSV_SCANNER_* keys — Tebakofile's sbom: block drifted"; exit 1; }
+          mkdir -p .tools
+          base="https://github.com/$OSV_SCANNER_REPO/releases/download/v$OSV_SCANNER_VERSION"
+          tools/fetch_verified.sh "$base/$OSV_SCANNER_ASSET" .tools/osv-scanner "$OSV_SCANNER_SHA256"
+          chmod +x .tools/osv-scanner
+          curl -fsSLO "$base/osv-scanner_SHA256SUMS"
+          got="$(awk -v a="$OSV_SCANNER_ASSET" '$2 == a {print $1}' osv-scanner_SHA256SUMS)"
+          [ "$got" = "$OSV_SCANNER_SHA256" ] || { echo "::error::osv-scanner pin mismatch: Tebakofile=$OSV_SCANNER_SHA256 release=${got:-ABSENT}"; exit 1; }
+          .tools/osv-scanner --version
+          for f in "${sboms[@]}"; do
+            echo "== osv-scanner: $(basename "$f")"
+            rc=0
+            # -L (scan lockfile): v2's spelling — SBOMs ride the lockfile
+            # path; the deprecated --sbom warns. rc 0 = parsed, clean;
+            # rc 1 = parsed, findings reported; anything else = the parse
+            # itself failed (warned loudly below, never fatal).
+            .tools/osv-scanner scan source -L "$f" --format=table 2>&1 | tee "$RUNNER_TEMP/osv-smoke.log" || rc=$?
+            case "$rc" in
+              0|1) echo "parse OK (rc=$rc: 0 = no findings, 1 = findings reported — report-only)" ;;
+              *) echo "::warning::osv-scanner could not parse $(basename "$f") (rc=$rc) — report-only, the publish continues" ;;
+            esac
+          done
+
       - name: Registry default policy (stable tracks the publish; prerelease never moves it)
         # Tag grammar (the workflow header): <version>[-<buildno>]. A
         # version carrying a non-numeric segment after the numeric prefix

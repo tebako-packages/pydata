@@ -283,6 +283,67 @@ tag whose version carries a non-numeric segment after the numeric prefix
 flagged `--prerelease` and the registry `default:` never moves off the
 latest stable (`tools/set_registry_default.rb` runs on stable tags only).
 
+## The SBOM lane (pydata#4 — the metanorma#168 feedstock template)
+
+Every POSIX leg emits `pydata-<version>-<asset-platform>.cdx.json`
+(CycloneDX 1.6) into its dist artifact, and the publish job ships it
+beside the payload with the same trust treatment as every other served
+name. tebako#1124's standing rules bind: components carry **purl +
+sha256**.
+
+- **Generation (per POSIX leg, tools/build).** The pinned CLI's `sbom`
+  verb (tebako#1120) in COMPLETE mode: `tebako sbom <image.tfs>
+  --closure closure/<version>-<triplet>.txt --ecosystem pypi --triplet
+  <triplet>`. Deterministic — the serial derives from the document's
+  identity content and the timestamp reads `SOURCE_DATE_EPOCH` pinned at
+  the feedstock commit (the product release's own `sbom_epoch`
+  convention, spec 13 §5a); two runs on unchanged inputs are
+  byte-identical. **Activation is the pin, never a workflow edit**: the
+  verb exists from the tebako release carrying tebako#1120, so an older
+  tools pin probes out and the step skips LOUDLY until the automated
+  pin roll brings a release carrying the verb.
+- **The input of record is the hashed closure TEXT
+  (`closure/<version>-<triplet>.txt`)** — the sha256-pinned wheel lock
+  the leg itself stages from (the verb's grammar is `<artifact>
+  <sha256>` / `<sha256> <artifact>` rows; the sha256sum spelling here
+  parses directly). The ecosystem word is **pypi** (PEP 427 wheel
+  names; the tag triplet rides as the `tebako:pypi:tags` property) —
+  the metanorma template's `gem`.
+- **The windows-ucrt leg skips loudly — no complete-mode input of
+  record exists for its shape.** Its closure record is stage_msys2's
+  `pacman -Q` of the prebuilt set: name+version rows, **no per-package
+  hashes**, so the verb's closure grammar refuses it by name; and the
+  verb's degraded inventory reads `specifications/*.gemspec` (a
+  rubygems layout a python image never carries — verified locally: the
+  refusal is the named exit 65). The honest annotation is the skip
+  notice, not a fabricated inventory. Activation path: stage_msys2
+  records the pacman cache archives' digests (the `.pkg.tar.zst` set
+  pacman itself signature-verified) — then the same complete mode
+  applies with `--ecosystem generic`.
+- **Signing (the offline GPG lane).** The publish job produces a
+  detached `.cdx.json.asc` with the SAME CI signing subkey material
+  `tebako publish --sign` consumes (`TEBAKO_CI_SIGNING_KEY`, the
+  recipe's `signing.keyid`) — gpg is the detached-sign instrument for
+  files the CLI does not itself sign. Declared-signing + absent secret
+  fails closed before any upload. This feedstock has **no sigstore
+  attestation lane** for any served name (the CLI-derived `.tfs.asc`
+  signatures never touch the disk) — the SBOM rides the same `.asc`
+  treatment as every other name, and the attestation lane is a named
+  follow-up for the publish job as a whole, not an SBOM-specific gap.
+- **The registry sidecar.** Each platform entry gains the additive
+  `sbom: {artifact, sha256}` pin, re-rendered from the release's OWN
+  served digests by `tools/render_sbom_sidecars.rb` at every publish —
+  the L3 mirror-by-value rule, because the CLI's registry upsert
+  round-trips its serde model and drops unknown keys. Pre-SBOM readers
+  ignore the key (the registry evolution law). A first-class `sbom:`
+  sidecar class is a registry-schema candidate for the product — until
+  it lands, the key is an additive unknown key by design.
+- **The smoke (report-only, never fails).** The publish job runs
+  osv-scanner over every staged SBOM — tebako#1124's universal
+  acceptance proof (parse OK / findings reported). osv-scanner is
+  pinned in Tebakofile's `sbom:` block, sha256-verified at fetch and
+  cross-checked against the release's own `osv-scanner_SHA256SUMS`.
+
 ## Next increment (named)
 
 - **The first real publish** — the owner's go: tag + dispatch. Until
