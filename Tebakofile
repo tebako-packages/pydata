@@ -144,6 +144,24 @@ tools:
       linux-gnu-x86_64: "d7666ada6951f434d912e035bd91a2dcde583cc7a66b2a53159161c2c8310186"
       windows-ucrt64: "ac902e2679f908bf82d5205abca216416ee59815cea3c891658a50eba1d8c393"
 
+# The SBOM lane (pydata#4, replicating the metanorma#168 feedstock
+# template; tebako#1124's standing rules). The legs generate the
+# CycloneDX 1.6 SBOM with the pinned tebako CLI's sbom verb (tebako#1120
+# — activates when the tools pin reaches the release carrying it); the
+# publish job attaches + signs the .cdx.json and runs the osv-scanner
+# parse smoke (report-only). The smoke's tool pin lives HERE with the
+# same discipline as the tools block (digest pinned, and cross-checked
+# against the release's own osv-scanner_SHA256SUMS at fetch time).
+sbom:
+  osv_scanner:
+    repo: "google/osv-scanner"
+    version: "2.7.1"
+    sha256:
+      macos-arm64: "b22c02877a811c8f78956e8643efa554932b7378f590d13f8e97d4e9448a29f3"
+      macos-x86_64: "b8420d5485ba792626315f1bf9a5a2046e971d38eea75bf9090c38852dbc3b1b"
+      linux-gnu-x86_64: "fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8"
+      linux-gnu-arm64: "983d22fbad9724514e3fcc6acc83b5fa64c5ffa6b0d9f510028f22c1b223ff81"
+
 # Signing (spec 09 §9; the metanorma/xml2rfc pattern): declared NOW so the
 # first publish (the next increment) signs from day one; the publish step
 # stages the org secret TEBAKO_CI_SIGNING_KEY into the publisher home.
